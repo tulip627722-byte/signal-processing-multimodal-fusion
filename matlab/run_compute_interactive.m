@@ -60,24 +60,22 @@ else
 end
 end
 
-function [opts, cancelled] = choose_correction(~)
-choice = questdlg(['稳定主分支默认不应用实验补偿。' newline ...
-    '如需试算，可手动输入距离、方位和俯仰偏差。'], '雷达测量补偿', ...
-    '原始数据（零补偿）', '手动输入补偿', '取消', '原始数据（零补偿）');
+function [opts, cancelled] = choose_correction(here)
+C = load_radar_measurement_correction(fullfile(here, ...
+    'radar_measurement_correction.json'));
+text = sprintf(['当前补偿：\n' ...
+    '距离  -%.6f m\n方位  -%.4f deg\n俯仰  -%.4f deg\n\n' ...
+    '正式计算建议应用当前补偿。'], ...
+    C.rangeBiasM, C.azimuthBiasDeg, C.elevationBiasDeg);
+choice = questdlg(text, '雷达测量补偿', ...
+    '应用当前补偿', '原始数据（不补偿）', '取消', '应用当前补偿');
 cancelled = isempty(choice) || strcmp(choice, '取消');
 opts = struct();
 if cancelled, return; end
-if strcmp(choice, '手动输入补偿')
-    values = inputdlg({'距离测量偏差 (m)', '方位测量偏差 (deg)', ...
-        '俯仰测量偏差 (deg)'}, '手动补偿', [1 36], {'0', '0', '0'});
-    if isempty(values), cancelled = true; return; end
-    nums = str2double(values);
-    if any(~isfinite(nums)) || nums(1) < 0
-        error('补偿参数必须是有限数值，距离偏差不能为负。');
-    end
-    opts.radarRangeBiasM = nums(1);
-    opts.radarAzimuthBiasDeg = nums(2);
-    opts.radarElevationBiasDeg = nums(3);
+if strcmp(choice, '原始数据（不补偿）')
+    opts.radarRangeBiasM = 0;
+    opts.radarAzimuthBiasDeg = 0;
+    opts.radarElevationBiasDeg = 0;
 end
 end
 
