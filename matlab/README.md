@@ -113,6 +113,7 @@ view_take
 | `tools\residual_check.m` | 板子差分，量当前参数下的残差（就是上面那张表） |
 | `tools\alignment_report.m` | 把雷达点投影到同步深度图，报告空间残差与时间误差 |
 | `tools\validate_outdoor_radar.m` | 用室外多距离棋盘数据验证测距、测角和坐标对齐 |
+| `tools\visualize_center_alignment.m` | 将棋盘中心与补偿前后雷达中心投影到彩色图并输出误差摘要 |
 | `tools\test_radar_measurement_correction.m` | 检查雷达补偿配置、符号约定和正式外参未被改写 |
 | `tools\calibrate_extrinsics_from_res.m` | 仅用九组 `res.mat` 点云差分，生成含角度、平移、测距偏差及六折验证的候选外参 |
 
