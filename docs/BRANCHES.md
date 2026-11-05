@@ -31,6 +31,26 @@ azimuthBiasDeg   = 3.2096
 elevationBiasDeg = 1.9813
 ```
 
+## experiment/pixel-level-extrinsics-20261105
+
+该分支在 `main` 基础上增加：
+
+- 以棋盘格角点中心为独立真值的像素级对齐流程。
+- 方位角补偿后，改用像素判据重解 `yaw`；再固定 `yaw` 一维搜索 `pitch`。
+- `pixel_verify2.m`、`yaw_solve.m`、`pitch_solve.m`、`show_centers.m`。
+- 文档 `docs/extrinsics/像素级外参校准-20261105.md` 与标注图。
+
+结果口径：
+
+```text
+t            = [+0.0038, −0.0439, +0.1295] m
+az 补偿       = 3.2096°
+pitch        = 8.73°（中位，σ 1.93°，逐组使用实测值）
+yaw          = 逐组解 −0.85° ~ +4.80°
+6 组水平偏差   ≤ 5.2 px（4.3 cm）
+6 组垂直偏差   ≤ 0.3 px（0.2 cm）
+```
+
 ## 合并条件
 
 实验分支只有满足以下条件后才允许合并到 `main`：
