@@ -1,0 +1,53 @@
+# Raw captures and generated results
+data/
+takes/
+results/
+**/takes/
+**/results/
+*.mat
+*.packets
+*.ply
+*.pcd
+*.bag
+*.zip
+
+# Camera frames and generated plots
+*.png
+*.jpg
+*.jpeg
+!docs/**/*.png
+
+# MATLAB generated files
+*.asv
+*.m~
+*.mexw64
+*.mexw32
+*.slxc
+*.fig
+
+# C# build outputs and local SDKs
+**/bin/
+**/obj/
+*.exe
+*.dll
+*.pdb
+*.user
+*.suo
+
+# Vendor firmware projects and hardware exports
+firmware/
+*.xsa
+*.bit
+*.elf
+*.bin
+
+# Local configuration and editor files
+calib.json
+camera_config.txt
+.matlab_prefs/
+.vs/
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
+

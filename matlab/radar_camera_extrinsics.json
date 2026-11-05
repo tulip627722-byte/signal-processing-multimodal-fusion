@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "sourceFrame": "depth_camera_openni",
+  "targetFrame": "radar",
+  "units": "m",
+  "cameraAxes": "X right, Y down, Z forward",
+  "radarAxes": "X right, Y forward, Z up",
+  "cameraToRadarR": [
+    [1, 0, 0],
+    [0, 0, 1],
+    [0, -1, 0]
+  ],
+  "cameraOriginInRadarM": [-0.0093, -0.0063, 0.1000],
+  "status": "constrained_surface_fit_20261104",
+  "note": "X/Y were refined from five takes by synchronized radar-to-depth surface alignment; one complete take (20261104_134227) was randomly held out. Z=0.10 m remains the measured mounting height because the front-facing data does not independently constrain vertical translation."
+}
