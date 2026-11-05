@@ -123,6 +123,37 @@ catch ex
     return;
 end
 
+% 雷达测量补偿也参与缓存判断，避免偏差参数更新后继续使用旧点云。
+try
+    correctionPath = [];
+    if isfield(o, 'radarCorrectionFile'), correctionPath = o.radarCorrectionFile; end
+    C = load_radar_measurement_correction(correctionPath);
+    expectedRangeBias = C.rangeBiasM;
+    expectedAzBias = C.azimuthBiasDeg;
+    expectedElBias = C.elevationBiasDeg;
+    if isfield(o, 'radarRangeBiasM'), expectedRangeBias = o.radarRangeBiasM; end
+    if isfield(o, 'radarAzimuthBiasDeg'), expectedAzBias = o.radarAzimuthBiasDeg; end
+    if isfield(o, 'radarElevationBiasDeg'), expectedElBias = o.radarElevationBiasDeg; end
+    correctionFields = {'radarRangeBiasM', 'radarAzimuthBiasDeg', 'radarElevationBiasDeg'};
+    correctionValues = [expectedRangeBias, expectedAzBias, expectedElBias];
+    for k = 1:numel(correctionFields)
+        if ~isfield(meta, correctionFields{k}) || ...
+                abs(double(meta.(correctionFields{k})) - correctionValues(k)) > 1e-9
+            why = '雷达测量补偿已新增或发生变化';
+            return;
+        end
+    end
+    dCorrection = dir(C.path);
+    dRes = dir(resFile);
+    if dRes.datenum < dCorrection.datenum
+        why = '雷达补偿文件比 res.mat 新';
+        return;
+    end
+catch ex
+    why = ['雷达补偿检查失败：' ex.message];
+    return;
+end
+
 % 参数比对（只有传进来的字段才比）
 fields = {'stride', 'eps', 'minPts', 'floorZ', 'mirrorDepth', 'useFloorAlignment', ...
           'cameraToRadarR', 'cameraOriginInRadarM', ...

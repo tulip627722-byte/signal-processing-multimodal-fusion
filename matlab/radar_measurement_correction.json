@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "source": "20261105 outdoor checkerboard captures at 3/4/5/6/7 m",
+  "convention": "corrected = measured - bias",
+  "rangeBiasM": 0.149477,
+  "azimuthBiasDeg": 3.2096,
+  "elevationBiasDeg": 1.9813,
+  "status": "provisional_leave_one_out_4_of_5_pass",
+  "applicable": true,
+  "acceptanceThresholdM": 0.15,
+  "trainingErrorsM": [0.15, 0.02, 0.05, 0.11, 0.08],
+  "leaveOneOutErrorsM": [0.16, 0.02, 0.06, 0.14, 0.12],
+  "note": "Keep separate from cameraToRadarR. This corrects radar algorithm measurement bias, not camera/radar mounting pose. The 3 m leave-one-out case is 0.16 m and narrowly misses the 0.15 m formal threshold, so the status remains provisional."
+}

@@ -132,6 +132,7 @@ metaOut = struct('takeDir', takeDir, 'takeName', takeName, ...
                  'cameraToRadarR', o.cameraToRadarR, ...
                  'cameraOriginInRadarM', o.cameraOriginInRadarM, ...
                  'extrinsicsFile', o.extrinsicsFile, ...
+                 'radarCorrectionFile', o.radarCorrectionFile, ...
                  'radarRangeBiasM', o.radarRangeBiasM, ...
                  'radarAzimuthBiasDeg', o.radarAzimuthBiasDeg, ...
                  'radarElevationBiasDeg', o.radarElevationBiasDeg, ...
@@ -155,6 +156,10 @@ for ii = 1:numel(stampFiles)
 end
 if isfile(o.extrinsicsFile)
     d = dir(o.extrinsicsFile);
+    stamp = max(stamp, d.datenum);
+end
+if isfile(o.radarCorrectionFile)
+    d = dir(o.radarCorrectionFile);
     stamp = max(stamp, d.datenum);
 end
 metaOut.sourceStamp = stamp;
@@ -271,8 +276,7 @@ hasElBias = isfield(o, 'radarElevationBiasDeg');
 d = struct('stride', 4, 'eps', 0.25, 'minPts', 3, 'floorZ', -1.15, 'maxFrames', [], ...
            'withColor', false, 'mirrorDepth', true, ...
            'extrinsicsFile', fullfile(here, 'radar_camera_extrinsics.json'), ...
-           'radarRangeBiasM', 0, 'radarAzimuthBiasDeg', 0, ...
-           'radarElevationBiasDeg', 0, ...
+           'radarCorrectionFile', fullfile(here, 'radar_measurement_correction.json'), ...
            'useFloorAlignment', false);
 f = fieldnames(d);
 for i = 1:numel(f)
@@ -284,16 +288,15 @@ if ~E.applicable
 end
 if ~hasR, o.cameraToRadarR = E.cameraToRadarR; end
 if ~hasT, o.cameraOriginInRadarM = E.cameraOriginInRadarM; end
-if ~hasRangeBias, o.radarRangeBiasM = E.radarRangeBiasM; end
-if ~hasAzBias, o.radarAzimuthBiasDeg = 0; end
-if ~hasElBias, o.radarElevationBiasDeg = 0; end
-if any(abs([o.radarRangeBiasM, o.radarAzimuthBiasDeg, o.radarElevationBiasDeg]) > 0)
-    o.radarCorrectionStatus = 'runtime_override';
-    o.radarCorrectionNote = '雷达距离/方位/俯仰补偿由 compute_take opts 显式传入。';
-else
-    o.radarCorrectionStatus = 'disabled';
-    o.radarCorrectionNote = '稳定主分支默认不应用 provisional 雷达测量补偿。';
+C = load_radar_measurement_correction(o.radarCorrectionFile);
+if ~C.applicable
+    error('雷达测量补偿未获准应用：%s', C.note);
 end
+if ~hasRangeBias, o.radarRangeBiasM = C.rangeBiasM; end
+if ~hasAzBias, o.radarAzimuthBiasDeg = C.azimuthBiasDeg; end
+if ~hasElBias, o.radarElevationBiasDeg = C.elevationBiasDeg; end
+o.radarCorrectionStatus = C.status;
+o.radarCorrectionNote = C.note;
 o.spatialAlignmentStatus = E.status;
 o.spatialAlignmentNote = E.note;
 if hasR || hasT

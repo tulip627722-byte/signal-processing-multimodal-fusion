@@ -83,7 +83,7 @@ run_compute_interactive
 
 - 单组计算：选择采集目录中的 `radar_adc.mat`。
 - 批量计算：选择包含多组采集的父目录，例如 `E:\leida\11-5`。
-- 稳定主分支默认零补偿；需要试算时可在界面手动输入距离、方位和俯仰偏差。
+- 计算前选择“应用当前补偿”或“原始数据（不补偿）”。
 - 结果统一保存在 `3.2\results\takes`。
 
 ### 命令行调用
@@ -102,6 +102,7 @@ view_take
 - 平移：默认相机光心在雷达原点上方 `0.10 m`，来自装机尺寸，属于安装估计，不是精密外参标定。
 - 旧的“每帧用 2% 高度分位数拉到地面”会随场景漂移，默认已关闭；仅可用 `useFloorAlignment=true` 复现旧结果。
 - 外参唯一来源是 `radar_camera_extrinsics.json`。其中 `cameraToRadarR` 把相机点旋转到雷达轴；当前 `cameraOriginInRadarM=[-0.0093,-0.0063,0.1000] m`。X/Y 来自五组同步表面拟合，另一整组随机留出验证；Z=10 cm 仍来自安装测量，因为当前正前方数据不能独立约束垂直平移。
+- 雷达测量补偿独立来自 `radar_measurement_correction.json`，当前按 `r-0.149477 m`、`az-3.2096 deg`、`el-1.9813 deg` 修正。它描述雷达算法偏差，不属于相机/雷达机械外参。
 - `view_take` 的中间画面会把雷达点以红圈叠加到深度点云中；两者已经处于同一个雷达坐标系，可以直接检查重合。
 - 修改外参文件后重新运行 `compute_all([], struct('force',true))`。每个结果的 `metaOut` 会保存实际使用的旋转矩阵、平移和外参状态。
 
@@ -111,6 +112,9 @@ view_take
 |---|---|
 | `tools\residual_check.m` | 板子差分，量当前参数下的残差（就是上面那张表） |
 | `tools\alignment_report.m` | 把雷达点投影到同步深度图，报告空间残差与时间误差 |
+| `tools\validate_outdoor_radar.m` | 用室外多距离棋盘数据验证测距、测角和坐标对齐 |
+| `tools\visualize_center_alignment.m` | 将棋盘中心与补偿前后雷达中心投影到彩色图并输出误差摘要 |
+| `tools\test_radar_measurement_correction.m` | 检查雷达补偿配置、符号约定和正式外参未被改写 |
 | `tools\calibrate_extrinsics_from_res.m` | 仅用九组 `res.mat` 点云差分，生成含角度、平移、测距偏差及六折验证的候选外参 |
 
 ### 基于 3.2 点云标定三脚架角度
