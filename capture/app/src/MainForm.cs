@@ -322,9 +322,14 @@ namespace Acquire
             CameraOption option = _cameraBox.SelectedItem as CameraOption;
             if (option == null) return;
             string text = option.Display + "　" + option.Reason;
+            if (option.Kind == CameraKind.Null)
+                text += "　【测试假画面：会生成彩虹条，不是真实相机】";
             if (option.Available && !option.HasDepth) text += "　【深度不可用】";
             if (!option.Available) text += "　【不可用，无法开始】";
             _cameraInfo.Text = text;
+            _cameraInfo.ForeColor = option.Kind == CameraKind.Null
+                ? Color.FromArgb(190, 70, 0)
+                : Color.FromArgb(90, 90, 90);
         }
 
         /// <summary>
@@ -435,6 +440,15 @@ namespace Acquire
                 MessageBox.Show(this, option.Display + "\r\n\r\n原因：" + option.Reason,
                     "相机不可用", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
+            }
+            if (option.Kind == CameraKind.Null)
+            {
+                DialogResult synthetic = MessageBox.Show(this,
+                    "当前选择的是 NullSource 合成测试源。\r\n\r\n" +
+                    "它只会生成彩虹条测试图片，不会采集 Astra 真实画面。\r\n" +
+                    "真实采集请取消，然后选择 Orbbec Astra。\r\n\r\n仍要运行合成测试吗？",
+                    "警告：当前不是真实相机", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
+                if (synthetic != DialogResult.Yes) return;
             }
 
             string output = _outputBox.Text.Trim();
