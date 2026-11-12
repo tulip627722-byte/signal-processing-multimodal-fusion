@@ -208,8 +208,7 @@ namespace Acquire
                     _cameraError = DynHelper.DescribeException(ex);
                     if (_cameraError.IndexOf("Failed to set USB interface", StringComparison.OrdinalIgnoreCase) >= 0)
                     {
-                        _cameraError += "\r\n处理方法：关闭所有旧版采集程序、OrbbecViewer 和 NiViewer，拔掉 Astra USB 等 5 秒，" +
-                                        "再插到电脑 USB 3.x 接口；仍失败时重启电脑或重装 Orbbec 驱动。";
+                        _cameraError += "\r\n建议：关闭相机软件，重新插拔 Astra 并使用 USB 3.x 接口。";
                     }
                     EmitLog("相机启动失败：" + _cameraError);
                     try { source.Dispose(); } catch { }

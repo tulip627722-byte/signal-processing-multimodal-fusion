@@ -517,7 +517,7 @@ namespace Acquire
             if (_wasBusy && idle && !string.IsNullOrEmpty(s.Error) && s.Error != _lastShownError)
             {
                 _lastShownError = s.Error;
-                MessageBox.Show(this, s.Error, "采集失败", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                MessageBox.Show(this, FriendlyError(s.Error), "采集失败", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
             _wasBusy = busy;
             _startButton.Enabled = idle;
@@ -549,7 +549,7 @@ namespace Acquire
                 _detailLabel.Text = s.Message;
             }
 
-            if (!string.IsNullOrEmpty(s.Error)) _detailLabel.Text = "错误：" + s.Error;
+            if (!string.IsNullOrEmpty(s.Error)) _detailLabel.Text = "错误：" + FriendlyErrorTitle(s.Error);
 
             _radarStatus.Text = _radarEnabled.Checked
                 ? "雷达[" + s.RadarHealth + "] " + s.RadarFps.ToString("0.00") + " fps | 帧 " + s.RadarFrames + " | 包 " + s.RadarPackets + " | 丢 " + s.RadarMissing +
@@ -561,6 +561,37 @@ namespace Acquire
             _remainStatus.Text = s.State == SessionState.Recording
                 ? "剩余 " + s.RemainingSeconds.ToString("0.0") + " s"
                 : (string.IsNullOrEmpty(s.TakeDirectory) ? "剩余 -" : ShortPath(s.TakeDirectory));
+        }
+
+        private static string FriendlyError(string error)
+        {
+            if (string.IsNullOrEmpty(error)) return "采集失败，请查看日志。";
+            if (error.IndexOf("Failed to set USB interface", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return "相机 USB 接口启动失败，可能被占用或驱动未释放。\r\n\r\n" +
+                       "1. 关闭其它采集/相机软件\r\n" +
+                       "2. 拔掉相机，等待 5 秒后插入 USB 3.x 接口\r\n" +
+                       "3. 点击“重新探测”后再采集\r\n\r\n" +
+                       "详细信息请看主界面日志。";
+            }
+            if (error.IndexOf("相机首帧验收失败", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                error.IndexOf("相机没有采到有效帧", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return "相机没有采到有效画面。\r\n\r\n请重新插拔相机并点击“重新探测”，详细信息请看主界面日志。";
+            }
+            return FriendlyErrorTitle(error) + "\r\n\r\n详细信息请看主界面日志。";
+        }
+
+        private static string FriendlyErrorTitle(string error)
+        {
+            if (string.IsNullOrEmpty(error)) return "采集失败";
+            string text = error.Replace('\r', ' ').Replace('\n', ' ').Trim();
+            while (text.StartsWith("InvalidOperationException:", StringComparison.OrdinalIgnoreCase))
+                text = text.Substring("InvalidOperationException:".Length).Trim();
+            int sentence = text.IndexOf('。');
+            if (sentence >= 0) text = text.Substring(0, sentence + 1);
+            if (text.Length > 90) text = text.Substring(0, 87) + "...";
+            return text;
         }
 
         private static string ShortPath(string path)        {
