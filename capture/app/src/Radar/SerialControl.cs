@@ -120,6 +120,28 @@ namespace Acquire
             return null;
         }
 
+        /// <summary>自动模式下返回全部候选，USB 串口优先；不能只猜一个，否则换电脑后很容易选错。</summary>
+        public static List<PortCandidate> AutoCandidates()
+        {
+            List<PortCandidate> ports = ListPorts();
+            ports.Sort(delegate(PortCandidate a, PortCandidate b)
+            {
+                int preferred = IsPreferred(b).CompareTo(IsPreferred(a));
+                return preferred != 0 ? preferred : string.CompareOrdinal(a.Name, b.Name);
+            });
+            return ports;
+        }
+
+        private static bool IsPreferred(PortCandidate port)
+        {
+            string text = (port.Name + " " + port.Description).ToUpperInvariant();
+            foreach (string hint in PreferredHints)
+            {
+                if (text.Contains(hint.ToUpperInvariant())) return true;
+            }
+            return false;
+        }
+
         // ---------------------------------------------------------------- 打开 / 发送
 
         public bool TryOpen(string portName, int baudRate, out string error)
@@ -146,22 +168,35 @@ namespace Acquire
             }
         }
 
-        public void SendStart() { SendCommand(0, TinyFrameCodec.TypeStart); StartSent++; }
-        public void SendPause() { SendCommand(2, TinyFrameCodec.TypePause); PauseSent++; }
+        public bool SendStart()
+        {
+            bool sent = SendCommand(0, TinyFrameCodec.TypeStart);
+            if (sent) StartSent++;
+            return sent;
+        }
 
-        public void SendCommand(uint id, ushort type)
+        public bool SendPause()
+        {
+            bool sent = SendCommand(2, TinyFrameCodec.TypePause);
+            if (sent) PauseSent++;
+            return sent;
+        }
+
+        public bool SendCommand(uint id, ushort type)
         {
             SerialPort serial = _port;
-            if (serial == null || !serial.IsOpen) return;
+            if (serial == null || !serial.IsOpen) return false;
             byte[] frame = TinyFrameCodec.BuildCommand(id, type);
             try
             {
                 serial.Write(frame, 0, frame.Length);
                 if (_log != null) _log("UART TX " + ToHex(frame));
+                return true;
             }
             catch (Exception ex)
             {
                 if (_log != null) _log("UART 发送失败：" + ex.Message);
+                return false;
             }
         }
 

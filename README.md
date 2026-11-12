@@ -8,7 +8,8 @@ ADT7880 毫米波雷达与 Orbbec Astra 深度相机的同步采集、MATLAB 点
 
 - `main`：稳定基线。使用正式相机到雷达外参，雷达距离/方位/俯仰默认零补偿。
 - `experiment/radar-angle-bias-20261105`：2026-11-05 室外 3–7 m 棋盘实验补偿。包含候选参数、验证脚本和分析报告。
-- 尚未创建 GitHub 远程仓库，也没有推送。
+- `feature/capture-reliability-20261112`：采集端跨电脑网络检查、串口自动确认、雷达断流检测与自动恢复。
+- GitHub 远端：`tulip627722-byte/signal-processing-multimodal-fusion`。
 
 实验分支的候选补偿为：
 
@@ -75,6 +76,8 @@ cd E:\leida\radar-camera-alignment\capture\app
 
 编译结果位于 `capture/app/bin`，该目录不会提交。设备要求、输出格式和自检方法见 [capture/README.md](capture/README.md)。
 
+采集可靠性分支的检验记录见 [采集程序优化检验](docs/capture-reliability-validation.md)。
+
 ## 正式坐标系与外参
 
 相机 OpenNI 坐标：`X 右 / Y 下 / Z 前`。  
@@ -90,6 +93,8 @@ t = [-0.0093, -0.0063, 0.1000] m
 
 p_radar = R * p_camera + t
 ```
+
+这里的 XYZ 坐标链路已经通过合成深度平面、16-bit PNG 解码、点云生成、相机系到雷达系转换及 PLY 回读自检。它证明坐标轴定义和转换实现一致；实际雷达测量补偿是否达到 `0.15 m` 门限仍按实验分支单独验收。
 
 完整来源和限制见 [雷达相机外参标定结果与坐标投影说明](docs/extrinsics/雷达相机外参标定结果与坐标投影说明.md)。
 

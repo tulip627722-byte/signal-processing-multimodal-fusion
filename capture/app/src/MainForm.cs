@@ -529,7 +529,8 @@ namespace Acquire
             if (!string.IsNullOrEmpty(s.Error)) _detailLabel.Text = "错误：" + s.Error;
 
             _radarStatus.Text = _radarEnabled.Checked
-                ? "雷达 " + s.RadarFps.ToString("0.00") + " fps | 帧 " + s.RadarFrames + " | 包 " + s.RadarPackets + " | 丢 " + s.RadarMissing
+                ? "雷达[" + s.RadarHealth + "] " + s.RadarFps.ToString("0.00") + " fps | 帧 " + s.RadarFrames + " | 包 " + s.RadarPackets + " | 丢 " + s.RadarMissing +
+                  (s.RadarRestarts > 0 ? " | 恢复 " + s.RadarRestarts : "")
                 : "雷达 已关闭";
             _colorStatus.Text = "彩色 " + s.ColorFps.ToString("0.0") + " fps | 帧 " + s.ColorFrames;
             _depthStatus.Text = "深度 " + s.DepthFps.ToString("0.0") + " fps | 帧 " + s.DepthFrames +

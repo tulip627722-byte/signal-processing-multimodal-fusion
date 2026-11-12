@@ -116,6 +116,7 @@ namespace Acquire
 
         /// <summary>采集过程中的实时计数（Summary 只在 Stop() 里才填完整，不能拿来做运行态判断）。</summary>
         public long ReceivedPacketsNow { get { lock (_gate) return _received; } }
+        public double LastPacketRelMsNow { get { lock (_gate) return _lastRel; } }
 
         public RadarSummary LiveSummary()
         {

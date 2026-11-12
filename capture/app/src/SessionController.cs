@@ -60,6 +60,8 @@ namespace Acquire
         public string TakeDirectory = "";
         public string Message = "";
         public string Error = "";
+        public string RadarHealth = "未启动";
+        public int RadarRestarts;
     }
 
     /// <summary>
@@ -81,11 +83,19 @@ namespace Acquire
         private TakeWriter _take;
         private RadarSink _radar;
         private SerialControl _serial;
-        private Thread _serialThread;
-        private volatile bool _serialRetryStop;
+        private readonly object _serialGate = new object();
+        private List<PortCandidate> _serialCandidates = new List<PortCandidate>();
+        private int _serialCandidateIndex;
+        private int _serialSendsOnCandidate;
         private string _serialPortUsed = "";
         private int _serialStartSent;
         private int _serialPauseSent;
+        private int _radarRestartAttempts;
+        private bool _radarEverHealthy;
+        private long _lastRadarPacketCount;
+        private double _lastRadarProgressAt;
+        private double _nextRadarRecoveryAt;
+        private volatile string _radarHealth = "未启动";
         private CameraCapture _camera;
         private CameraOption _cameraOption;
         private DepthIntrinsics _intrinsics;
@@ -116,6 +126,9 @@ namespace Acquire
             if (options.DelaySeconds < 0 || options.DelaySeconds > 60)
                 throw new ArgumentOutOfRangeException("options.DelaySeconds", "延迟应在 0~60 秒");
 
+            if (options.RadarEnabled)
+                options.LocalIp = RadarNetwork.ValidateLocalAddress(options.LocalIp);
+
             Directory.CreateDirectory(options.OutputRoot);
             _options = options;
             _cameraOption = options.Camera;
@@ -127,6 +140,15 @@ namespace Acquire
             _takeDirectory = "";
             _radarSummary = null;
             _cameraStats = null;
+            _serialCandidates = new List<PortCandidate>();
+            _serialCandidateIndex = 0;
+            _serialSendsOnCandidate = 0;
+            _radarRestartAttempts = 0;
+            _radarEverHealthy = false;
+            _lastRadarPacketCount = 0;
+            _lastRadarProgressAt = 0;
+            _nextRadarRecoveryAt = 0;
+            _radarHealth = options.RadarEnabled ? "等待启动" : "已关闭";
             _state = SessionState.Countdown;
             _countdown = options.DelaySeconds;
             _message = options.DelaySeconds > 0 ? "倒计时" : "启动中";
@@ -223,6 +245,7 @@ namespace Acquire
 
                 if (o.RadarEnabled)
                 {
+                    EmitLog("雷达网络检查：" + RadarNetwork.Describe(o.LocalIp));
                     _radar = new RadarSink(_take, _tb, o.PacketsPerFrame, o.PayloadBytes, EmitLog);
                     _radar.Start(o.LocalIp, o.LocalPort, o.BoardIp);
                     StartSerial(o);
@@ -253,18 +276,11 @@ namespace Acquire
                 Action started = RecordingStarted;
                 if (started != null) { try { started(); } catch { } }
 
-                bool warnedSilence = false;
                 while (!_stopRequested)
                 {
                     double elapsed = _tb.ElapsedSeconds;
                     if (elapsed >= o.DurationSeconds) break;
-
-                    if (!warnedSilence && _radar != null && elapsed > 3.0 && _radar.ReceivedPacketsNow == 0)
-                    {
-                        warnedSilence = true;
-                        EmitLog("警告：已记录 3 秒仍未收到雷达包，请检查雷达 IP/端口与网线");
-                        _message = "记录中（雷达无数据）";
-                    }
+                    if (_radar != null) MonitorRadar(o, elapsed);
                     Thread.Sleep(25);
                 }
 
@@ -322,73 +338,109 @@ namespace Acquire
         }
 
         /// <summary>
-        /// 打开 UART 并发 Start。固件需要这条命令才开始往 UDP 发数据，
-        /// 所以带一个 500 ms 的重发循环，收到第一个包就停。
+        /// 枚举 UART 候选并发 Start。自动模式保留全部端口，后续由看门狗逐个尝试，
+        /// 以实际收到 UDP 数据作为“雷达启动成功”的唯一依据。
         /// </summary>
         private void StartSerial(SessionOptions o)
         {
-            _serial = new SerialControl(EmitLog);
+            _serialCandidates = new List<PortCandidate>();
+            if (!string.IsNullOrEmpty(o.SerialPortName))
+                _serialCandidates.Add(new PortCandidate(o.SerialPortName, "用户指定"));
+            else
+                _serialCandidates = SerialControl.AutoCandidates();
 
-            string port = o.SerialPortName;
-            string reason;
-            if (string.IsNullOrEmpty(port))
-            {
-                port = SerialControl.AutoDetect(out reason);
-                EmitLog("串口自动选择：" + reason);
-            }
-            if (string.IsNullOrEmpty(port))
+            if (_serialCandidates.Count == 0)
             {
                 EmitLog("警告：没有可用串口，雷达不会启动（UDP 会一直收不到包）");
+                _radarHealth = "故障：未发现串口";
+                return;
+            }
+            EmitLog("串口自动探测到 " + _serialCandidates.Count + " 个候选，将以雷达 UDP 回包确认正确端口");
+            _serialCandidateIndex = 0;
+            OpenCurrentSerial(o, false);
+            _nextRadarRecoveryAt = 1.0;
+        }
+
+        private void MonitorRadar(SessionOptions o, double elapsed)
+        {
+            long packets = _radar.ReceivedPacketsNow;
+            if (packets > _lastRadarPacketCount)
+            {
+                bool recovered = !_radarEverHealthy || _radarHealth != "运行正常";
+                _lastRadarPacketCount = packets;
+                _lastRadarProgressAt = elapsed;
+                _radarEverHealthy = true;
+                _radarHealth = "运行正常";
+                _message = "记录中（雷达正常）";
+                _serialSendsOnCandidate = 0;
+                _nextRadarRecoveryAt = elapsed + 1.0;
+                if (recovered) EmitLog("雷达启动/恢复成功：已收到 " + packets + " 个包，串口 " + _serialPortUsed);
                 return;
             }
 
-            string err;
-            if (!_serial.TryOpen(port, o.SerialBaud, out err))
+            double silentSeconds = elapsed - _lastRadarProgressAt;
+            double threshold = _radarEverHealthy ? 2.0 : 1.0;
+            if (silentSeconds < threshold || elapsed < _nextRadarRecoveryAt) return;
+
+            _radarRestartAttempts++;
+            _radarHealth = _radarEverHealthy ? "断流，自动重启中" : "未回包，自动检测中";
+            _message = "记录中（" + _radarHealth + "）";
+
+            bool switchPort = _serial == null || !_serial.IsOpen || _serialSendsOnCandidate >= 2;
+            if (switchPort)
             {
-                EmitLog("警告：串口 " + port + " 打开失败（" + err + "），雷达不会启动");
-                return;
+                if (_serialCandidates.Count > 1)
+                    _serialCandidateIndex = (_serialCandidateIndex + 1) % _serialCandidates.Count;
+                OpenCurrentSerial(o, true);
             }
-
-            _serialPortUsed = port;
-            _serial.SendStart();
-            _serialStartSent = _serial.StartSent;
-
-            _serialRetryStop = false;
-            _serialThread = new Thread(delegate()
+            else
             {
-                const int maxAttempts = 20;      // 20 x 500ms = 10s
-                for (int i = 1; i <= maxAttempts; i++)
+                EmitLog("雷达 " + silentSeconds.ToString("0.0") + " 秒无数据，自动重发 Start（第 " + _radarRestartAttempts + " 次恢复）");
+                if (_serial.SendPause()) _serialPauseSent++;
+                Thread.Sleep(80);
+                if (_serial.SendStart()) _serialStartSent++;
+                _serialSendsOnCandidate++;
+            }
+            _nextRadarRecoveryAt = elapsed + 1.0;
+        }
+
+        private void OpenCurrentSerial(SessionOptions o, bool recovery)
+        {
+            lock (_serialGate)
+            {
+                if (_serial != null) { try { _serial.Close(); } catch { } }
+                _serial = new SerialControl(EmitLog);
+                _serialSendsOnCandidate = 0;
+                int checkedPorts = 0;
+                while (checkedPorts < _serialCandidates.Count)
                 {
-                    for (int w = 0; w < 5 && !_serialRetryStop; w++) Thread.Sleep(100);
-                    if (_serialRetryStop) return;
-                    RadarSink radar = _radar;
-                    if (radar != null && radar.ReceivedPacketsNow > 0)
+                    PortCandidate candidate = _serialCandidates[_serialCandidateIndex];
+                    string error;
+                    if (_serial.TryOpen(candidate.Name, o.SerialBaud, out error))
                     {
-                        EmitLog("雷达已回包（" + radar.ReceivedPacketsNow + " 包），停止重发 Start");
+                        _serialPortUsed = candidate.Name;
+                        if (_serial.SendStart()) _serialStartSent++;
+                        _serialSendsOnCandidate = 1;
+                        EmitLog((recovery ? "雷达自动恢复" : "雷达启动") + "：尝试串口 " + candidate);
                         return;
                     }
-                    SerialControl serial = _serial;
-                    if (serial == null || !serial.IsOpen) return;
-                    serial.SendStart();
-                    _serialStartSent = serial.StartSent;
+                    EmitLog("串口 " + candidate.Name + " 打开失败：" + error);
+                    _serialCandidateIndex = (_serialCandidateIndex + 1) % _serialCandidates.Count;
+                    checkedPorts++;
                 }
-                EmitLog("警告：已重发 Start " + maxAttempts + " 次仍未收到雷达包，请检查串口选择/波特率/网线");
-            });
-            _serialThread.Name = "Acquire UART start";
-            _serialThread.IsBackground = true;
-            _serialThread.Start();
+                _radarHealth = "故障：串口均无法打开";
+            }
         }
 
         private void StopSerial()
         {
-            _serialRetryStop = true;
             SerialControl serial = _serial;
             if (serial != null && serial.IsOpen)
             {
-                serial.SendPause();
-                _serialPauseSent = serial.PauseSent;
+                if (serial.SendPause()) _serialPauseSent++;
             }
             if (serial != null) serial.Close();
+            _radarHealth = "已停止";
         }
 
         private void TryFinalizeOnError(SessionOptions o)        {
@@ -489,6 +541,7 @@ namespace Acquire
         serialObj.Add("baudRate", o.SerialBaud);
         serialObj.Add("startSent", _serialStartSent);
         serialObj.Add("pauseSent", _serialPauseSent);
+        serialObj.Add("recoveryAttempts", _radarRestartAttempts);
         serialObj.Add("note", "UART 只发控制帧（Start 0xD000 / Pause 0xD002），ADC 数据走 UDP");
         meta.Add("serial", serialObj);
 
@@ -596,6 +649,8 @@ namespace Acquire
             s.CountdownRemaining = _countdown;
             s.Message = _message;
             s.Error = _error;
+            s.RadarHealth = _radarHealth;
+            s.RadarRestarts = _radarRestartAttempts;
             s.TakeDirectory = _takeDirectory;
 
             Timebase tb = _tb;
