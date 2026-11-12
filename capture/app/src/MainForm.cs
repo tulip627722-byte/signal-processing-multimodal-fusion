@@ -40,6 +40,8 @@ namespace Acquire
         private SessionController _controller;
         private List<CameraOption> _cameras = new List<CameraOption>();
         private bool _closing;
+        private bool _wasBusy;
+        private string _lastShownError = "";
 
         public MainForm()
         {
@@ -497,6 +499,13 @@ namespace Acquire
             }
 
             bool idle = s.State == SessionState.Idle;
+            bool busy = !idle;
+            if (_wasBusy && idle && !string.IsNullOrEmpty(s.Error) && s.Error != _lastShownError)
+            {
+                _lastShownError = s.Error;
+                MessageBox.Show(this, s.Error, "采集失败", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+            _wasBusy = busy;
             _startButton.Enabled = idle;
             _stopButton.Enabled = !idle;
             _cameraBox.Enabled = idle;

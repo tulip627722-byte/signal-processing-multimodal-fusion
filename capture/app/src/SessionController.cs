@@ -187,8 +187,9 @@ namespace Acquire
                 try
                 {
                     source.Open();
+                    ValidateCameraFrames(source, _cameraOption);
                     _cameraModeNote = DescribeModes(source);
-                    EmitLog("相机已打开：" + source.Model + " / " + source.Serial +
+                    EmitLog("相机首帧验收通过：" + source.Model + " / " + source.Serial +
                             (source.HasDepth ? "（含深度）" : "（深度不可用）"));
 
                     IDepthIntrinsicsProvider provider = source as IDepthIntrinsicsProvider;
@@ -205,11 +206,15 @@ namespace Acquire
                 catch (Exception ex)
                 {
                     _cameraError = DynHelper.DescribeException(ex);
+                    if (_cameraError.IndexOf("Failed to set USB interface", StringComparison.OrdinalIgnoreCase) >= 0)
+                    {
+                        _cameraError += "\r\n处理方法：关闭所有旧版采集程序、OrbbecViewer 和 NiViewer，拔掉 Astra USB 等 5 秒，" +
+                                        "再插到电脑 USB 3.x 接口；仍失败时重启电脑或重装 Orbbec 驱动。";
+                    }
                     EmitLog("相机启动失败：" + _cameraError);
                     try { source.Dispose(); } catch { }
                     source = null;
-                    if (!o.RadarEnabled)
-                        throw new InvalidOperationException("相机不可用且雷达未启用，无法采集。" + _cameraError);
+                    throw new InvalidOperationException("相机没有采到有效帧，已阻止本次采集。" + _cameraError);
                 }
 
                 // 倒计时：这段时间相机已经在跑，持续抽帧丢弃，把彩色和深度都预热好。
@@ -276,11 +281,29 @@ namespace Acquire
                 Action started = RecordingStarted;
                 if (started != null) { try { started(); } catch { } }
 
+                bool cameraRecordingConfirmed = false;
                 while (!_stopRequested)
                 {
                     double elapsed = _tb.ElapsedSeconds;
                     if (elapsed >= o.DurationSeconds) break;
                     if (_radar != null) MonitorRadar(o, elapsed);
+                    if (!cameraRecordingConfirmed && _camera != null)
+                    {
+                        CameraCaptureStats cameraNow = _camera.Snapshot();
+                        bool colorOk = !o.Camera.HasColor || cameraNow.ColorFrames > 0;
+                        bool depthOk = !o.Camera.HasDepth || cameraNow.DepthFrames > 0;
+                        if (colorOk && depthOk)
+                        {
+                            cameraRecordingConfirmed = true;
+                            EmitLog("相机落盘确认：彩色 " + cameraNow.ColorFrames + " 帧，深度 " + cameraNow.DepthFrames + " 帧");
+                        }
+                        else if (elapsed >= 3.0)
+                        {
+                            throw new InvalidOperationException(
+                                "相机进入记录后 3 秒仍未落盘：彩色 " + cameraNow.ColorFrames + " 帧，深度 " +
+                                cameraNow.DepthFrames + " 帧。已停止采集，请关闭占用相机的程序并重新插拔 USB。");
+                        }
+                    }
                     Thread.Sleep(25);
                 }
 
@@ -313,6 +336,7 @@ namespace Acquire
                 _error = DynHelper.DescribeException(ex);
                 EmitLog("采集异常：" + _error);
                 _message = "失败：" + _error;
+                try { StopSerial(); } catch { }
                 TryFinalizeOnError(o);
             }
             finally
@@ -335,6 +359,33 @@ namespace Acquire
                 _state = SessionState.Idle;
                 _countdown = 0;
             }
+        }
+
+        private void ValidateCameraFrames(ICameraSource source, CameraOption expected)
+        {
+            bool needColor = expected != null && expected.HasColor;
+            bool needDepth = expected != null && expected.HasDepth;
+            bool gotColor = false;
+            bool gotDepth = false;
+            DateTime deadline = DateTime.UtcNow.AddSeconds(3);
+
+            EmitLog("相机首帧验收：最多等待 3 秒，要求" +
+                    (needColor ? "彩色" : "") + (needColor && needDepth ? "+" : "") + (needDepth ? "深度" : "任意有效帧"));
+            while (!_stopRequested && DateTime.UtcNow < deadline)
+            {
+                CameraFrame frame = source.ReadFrame(150);
+                if (frame == null) continue;
+                if (frame.HasColor) gotColor = true;
+                if (frame.HasDepth) gotDepth = true;
+                if ((needColor || needDepth) ? (!needColor || gotColor) && (!needDepth || gotDepth) : gotColor || gotDepth)
+                    return;
+            }
+
+            string missing = !gotColor && !gotDepth ? "彩色和深度均为 0 帧"
+                : (!gotColor ? "彩色为 0 帧" : "深度为 0 帧");
+            throw new InvalidOperationException(
+                "相机首帧验收失败（" + missing + "）。请关闭 OrbbecViewer/NiViewer/其它采集程序，" +
+                "重新插拔相机并优先连接电脑的 USB 3.x 接口；若仍失败，请重装 Orbbec/OpenNI2 驱动。");
         }
 
         /// <summary>

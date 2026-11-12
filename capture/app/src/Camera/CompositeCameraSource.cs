@@ -45,7 +45,7 @@ namespace Acquire
         public CameraKind Kind { get { return _depth.Kind; } }
         public string Model { get { return _depth.Model + " + UVC 彩色"; } }
         public string Serial { get { return _depth.Serial; } }
-        public bool HasColor { get { return _color != null; } }
+        public bool HasColor { get { return _opened; } }
         public bool HasDepth { get { return _depth.HasDepth; } }
         public double DepthScaleMeters { get { return _depth.DepthScaleMeters; } }
         public long ColorFrames { get { return Interlocked.Read(ref _colorFrames); } }
@@ -81,6 +81,10 @@ namespace Acquire
                     _thread.Start();
                 }
             }
+
+            if (!_depth.HasDepth && !_opened)
+                throw new InvalidOperationException("深度和彩色流都没有成功启动。" +
+                    (_colorError.Length == 0 ? "请确认相机没有被其它程序占用。" : "彩色错误：" + _colorError));
         }
 
         private void ColorLoop()
