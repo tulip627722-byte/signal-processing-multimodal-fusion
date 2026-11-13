@@ -1,126 +1,150 @@
-# Radar-Camera Alignment
+# 多模态同步采集、标定与可视化融合系统
 
-ADT7880 毫米波雷达与 Orbbec Astra 深度相机的同步采集、MATLAB 点云处理、坐标投影和外参验证工程。
+面向室内验证、普通室外 3–7 m 和后续矿山感知场景，构建 **ADT7880 毫米波雷达 + RGB/深度相机 + Livox MID-70 激光雷达** 的多源数据采集与处理平台。系统覆盖统一时间基准采集、设备健康监控、时空标定、雷达信号处理、点云生成、四窗口实时可视化和可复现验证。
 
-本仓库只保存可审查、可复现的源码与说明。原始 ADC、彩色图、深度图、点云、MATLAB 结果和厂商固件工程不进入 Git。
+**项目成员：余佳欣、苟怡菲、闫傲雪**
 
-## 仓库状态
+> 当前首版完成四路独立显示与同步采集，尚不宣称已经完成跨传感器实时融合叠加。MID-70 真机接口已提供桥接源码，因当前无设备和 C++ 构建环境，真机连接、PTP/PPS 和断流恢复仍需硬件到位后验收。
 
-- `main`：稳定基线。使用正式相机到雷达外参，雷达距离/方位/俯仰默认零补偿。
-- `experiment/radar-angle-bias-20261105`：2026-11-05 室外 3–7 m 棋盘实验补偿。包含候选参数、验证脚本和分析报告。
-- `feature/capture-reliability-20261112`：采集端跨电脑网络检查、串口自动确认、雷达断流检测与自动恢复。
-- GitHub 远端：`tulip627722-byte/signal-processing-multimodal-fusion`。
+![四窗口多模态同步采集上位机](docs/images/multiview-dashboard.png)
 
-实验分支的候选补偿为：
+上图由程序的合成相机、真实 UDP 回环毫米波数据和 MID-70 合成点云实际运行生成；雷达距离谱中的合成主目标位于 `3.00 m`。合成模式用于无硬件开发和回归，不作为真机性能结果。
 
-```text
-range_corrected = range_measured - 0.149477 m
-az_corrected    = az_measured    - 3.2096 deg
-el_corrected    = el_measured    - 1.9813 deg
+## 系统架构
+
+```mermaid
+flowchart LR
+    A[ADT7880<br/>毫米波 ADC] --> T[统一单调时钟<br/>Stopwatch/QPC]
+    B[RGB / Depth<br/>Astra / RealSense] --> T
+    C[Livox MID-70<br/>Livox-SDK] --> T
+    T --> P[最新帧预览通道<br/>慢 UI 不阻塞采集]
+    T --> D[原始数据落盘<br/>manifest.csv + meta.json]
+    P --> U[2×2 多窗口上位机<br/>RGB / 深度 / 距离谱 / 点云]
+    D --> M[MATLAB 处理链<br/>距离-多普勒 / CFAR / Bartlett / 聚类]
+    M --> E[外参投影与误差验证]
 ```
 
-该候选留一验证五组中四组通过，3 m 组为 `0.16 m`，略高于 `0.15 m` 门限，因此不能直接合并到 `main`。
+## 核心能力
 
-## 目录结构
+| 子系统 | 当前能力 |
+|---|---|
+| 同步采集 | RGB、深度、毫米波雷达和 LiDAR 共用相对时间轴；`manifest.csv` 记录每帧/批次文件和时间戳 |
+| 采集可靠性 | 固定网卡地址检查、串口自动枚举、UDP 回包确认、首次无包重发、断流自动 Pause/Start 与串口切换 |
+| 相机链路 | 首帧验收、彩色 PNG、16-bit 深度 PNG、可选相机点云、内参与深度单位记录 |
+| 毫米波处理 | ADC 收包与丢包统计、MAT 落盘、1024 点 Hamming 距离 FFT 实时预览、MATLAB 距离/多普勒/CFAR/近场 Bartlett/聚类 |
+| 激光雷达 | `ILidarSource` 抽象、合成/回放/MID-70 原生桥接源、版本化点云批次、交互式点云旋转缩放 |
+| 工程验证 | 无硬件四路自测、UDP 回环、take 结构校验、FFT 已知峰值、点云回读、UI 冒烟 |
+
+## 本周成果（2026-11-09—2026-11-13）
+
+### 1. 基于原采集程序完成可靠性优化
+
+- 自动检查本机雷达网卡地址，避免跨电脑部署时静默收不到数据。
+- 自动枚举串口，以收到真实 UDP ADC 包作为雷达启动成功的唯一判断。
+- 首次无包自动重发 Start；采集中断流自动 Pause/Start、重开或切换串口。
+- 增加相机首帧验收、进入记录后的落盘验收、GUI 健康状态和恢复次数。
+- 相机 PNG 编码与取帧解耦；写盘跟不上时只统计并丢弃待写帧，不拖慢设备取帧。
+
+### 2. 完成四窗口可视化同步采集上位机
+
+- 单窗口 `2×2` 同步展示 RGB、深度伪彩、ADT7880 距离谱和 MID-70 点云。
+- 深度显示范围可调，实时显示有效深度点比例。
+- 毫米波按完整帧抽样执行距离 FFT，并显示最强峰值距离和强度。
+- 点云支持鼠标拖动旋转与滚轮缩放，显示批次率、点数和设备状态。
+- 预览采用“最新帧覆盖”缓冲；UI 落后只覆盖旧预览，不影响原始数据落盘。
+- 新增 MID-70 合成、二进制回放与 Livox-SDK 原生桥接接口。
+
+### 3. 完成时空标定与室外数据分析
+
+- 正式机械外参留出板心误差由 `0.473 m` 降至 `0.150 m`。
+- 室外 3–7 m 距离关系拟合为 `Radar ≈ 0.9998 × nominal + 0.150 m`，表现为固定偏差而非比例误差。
+- 五组实验拟合集的三维平均误差约由 `0.359 m` 降至 `0.102 m`，降低约 `71.7%`。
+- 留一验证为 5 组中 4 组达到 `0.15 m` 门限，3 m 组约 `0.16 m`；因此候选距离/方位/俯仰补偿仍为实验结论，稳定处理链默认不启用。
+
+| 验证项 | 结果 |
+|---|---:|
+| 正式外参留出误差 | `0.473 → 0.150 m` |
+| 五组距离谱峰值偏差 | 约 `0.14–0.16 m` |
+| 实验拟合集平均误差 | `0.359 → 0.102 m` |
+| 留一验证 | `4 / 5` 通过，3 m 约 `0.16 m` |
+| 四路合成自测 | RGB、Depth、Radar、LiDAR 全部通过 |
+
+| 距离拟合 | 五组距离谱 |
+|---|---|
+| ![距离线性拟合](docs/experiments/2026-11-05/distance_fit.png) | ![五组距离谱](docs/experiments/2026-11-05/range_profiles.png) |
+
+![目标中心补偿前后对比](docs/experiments/2026-11-05/center_alignment_before_after.png)
+
+## 深度相机与场景路线
+
+结合普通室外、多云、3–7 m 以及后续露天矿场景的选型分析：
+
+- **Astra Pro**：保留作室内和短距离对照，不作为室外 3–7 m 主传感器。
+- **普通室外 3–7 m**：优先验证被动双目 `Stereolabs ZED 2i`。
+- **车载、露天矿和长期工业部署**：采用 `ZED X` 级工业双目与 LiDAR 融合，补充防护、减振、镜头清洁和工业连接方案。
+- **短距离工业避障**：可现场评估工业 ToF；高精度体积或结构测量应采用激光轮廓或地面激光扫描。
+
+最终型号仍需在真实多云、逆光、粉尘和振动条件下完成 3/5/7 m A/B 测试。
+
+## 数据产物
+
+一次四路采集目录包括：
 
 ```text
-capture/
-  app/src/              C# WinForms 同步采集源码
-  docs/                 采集、同步和硬件注意事项
-matlab/
-  algorithm/            距离/多普勒/CFAR/近场 Bartlett/聚类
-  tools/                标定、诊断和验证工具
-  verify_range_fft/     距离 FFT 独立核验工具
-  compute_take.m        单组计算入口
-  compute_all.m         批量计算入口
-  run_compute_interactive.m  图形化文件选择入口
-docs/
-  extrinsics/           正式外参说明与验证图
-  BRANCHES.md           分支边界与合并规则
-  NOTES.md              使用限制和注意事项
+take/
+├─ radar_adc.mat             毫米波原始 ADC
+├─ radar_frames.csv          雷达帧完整性和丢包统计
+├─ color/*.png               RGB 帧
+├─ depth/*.png               16-bit 深度帧
+├─ lidar/*.bin               LIVOXBIN_V1 点云批次
+├─ depth_scale.txt
+├─ manifest.csv              四路统一时间轴
+└─ meta.json                 设备、模式、内参、帧率、统计与告警
 ```
 
-## MATLAB 快速使用
+原始 ADC、彩色图、深度图、点云、MATLAB 结果和厂商 SDK 二进制不进入 Git 仓库。
 
-需要 MATLAB R2025a 或兼容版本。将采集数据保存在仓库外部，然后运行：
+## 快速运行
+
+采集程序保持 `.NET Framework 4.0`、WinForms、x64 和系统 `csc.exe` 构建方式：
+
+```powershell
+cd E:\leida\radar-camera-alignment\capture\app
+.\build.ps1
+.\bin\Acquire.exe
+```
+
+无硬件四路全链路测试：
+
+```powershell
+.\bin\Acquire.exe --self-test --delay 0 --duration 3 --fps 2
+```
+
+重新生成 README 中的合成演示截图：
+
+```powershell
+.\bin\Acquire.exe --demo-screenshot ..\..\docs\images\multiview-dashboard.png
+```
+
+MATLAB 单组或批量处理：
 
 ```matlab
 cd('E:\leida\radar-camera-alignment\matlab')
 run_compute_interactive
 ```
 
-交互入口支持：
+更多采集格式与设备说明见 [capture/README.md](capture/README.md)，自动测试与 30 分钟压力测试结果见 [docs/multiview-validation.md](docs/multiview-validation.md)，MID-70 原生桥接见 [capture/native/LivoxBridge/README.md](capture/native/LivoxBridge/README.md)。
 
-- 单组：选择一次采集目录里的 `radar_adc.mat`。
-- 批量：选择包含多组采集目录的父目录。
-- `main` 默认零补偿，也可以手动输入试算参数。
-- 结果写到仓库内的 `results/takes`，该目录已被 Git 忽略。
+## 阶段指标与后续计划
 
-命令行方式：
+以下是下一阶段目标，不作为当前已完成实测结果：
 
-```matlab
-takeDir = 'E:\your-data\20261105_155359_outdoor-7m';
-[resFile, summary] = compute_take(takeDir);
+| 指标 | 阶段目标 |
+|---|---:|
+| 连续采集丢帧率 | `< 1%` |
+| P95 预览延迟 | `≤ 2 个帧周期` |
+| 稳定性测试 | 连续 `30 min` 无异常断流 |
+| 数据一致性 | 四路文件、manifest 与 meta 完全一致 |
+| 几何验证 | 独立数据三维板心误差 `≤ 0.15 m` |
 
-compute_all([], struct('root', 'E:\your-data'));
-```
-
-## 采集程序
-
-C# 采集程序源码位于 `capture/app/src`，目标为 .NET Framework 4.0 x64：
-
-```powershell
-cd E:\leida\radar-camera-alignment\capture\app
-.\build.ps1
-```
-
-编译结果位于 `capture/app/bin`，该目录不会提交。设备要求、输出格式和自检方法见 [capture/README.md](capture/README.md)。
-
-采集可靠性分支的检验记录见 [采集程序优化检验](docs/capture-reliability-validation.md)。
-
-## 正式坐标系与外参
-
-相机 OpenNI 坐标：`X 右 / Y 下 / Z 前`。  
-雷达坐标：`X 右 / Y 前 / Z 上`。
-
-稳定主分支使用：
-
-```text
-R = [1  0  0
-     0  0  1
-     0 -1  0]
-t = [-0.0093, -0.0063, 0.1000] m
-
-p_radar = R * p_camera + t
-```
-
-这里的 XYZ 坐标链路已经通过合成深度平面、16-bit PNG 解码、点云生成、相机系到雷达系转换及 PLY 回读自检。它证明坐标轴定义和转换实现一致；实际雷达测量补偿是否达到 `0.15 m` 门限仍按实验分支单独验收。
-
-完整来源和限制见 [雷达相机外参标定结果与坐标投影说明](docs/extrinsics/雷达相机外参标定结果与坐标投影说明.md)。
-
-## 数据要求
-
-一次有效采集目录至少需要：
-
-```text
-radar_adc.mat
-radar_frames.csv
-manifest.csv
-meta.json
-color/*.png
-depth/*.png
-depth_scale.txt
-```
-
-原始数据体积很大，必须放在 Git 仓库外。不要用 Git LFS 代替数据管理，除非后续明确建立独立数据仓库。
-
-## 验收原则
-
-- 至少五组有效目标数据。
-- 独立留出验证的三维板心误差不超过 `0.15 m`。
-- 参数不能贴搜索边界。
-- 机械外参与雷达算法偏差必须分开保存。
-- Astra Pro 室外深度只作弱参考，雷达距离验证优先使用卷尺距离和原始距离谱。
-
-详细分支和合并规则见 [docs/BRANCHES.md](docs/BRANCHES.md)，运行注意事项见 [docs/NOTES.md](docs/NOTES.md)。
-
+下一步工作：接入 MID-70 真机，完成发现、连接、点格式与断流恢复验证；评估毫米波雷达与 LiDAR 独立网卡/网段；验证 PTPv2/PPS 时间同步；在真机数据基础上开展毫米波、激光点云与 RGB/深度的坐标统一和融合叠加。

@@ -19,12 +19,14 @@ $sources = Get-ChildItem -LiteralPath (Join-Path $projectDir 'src') -Recurse -Fi
     ForEach-Object { $_.FullName }
 
 $outputFile = Join-Path $outputDir $OutputName
+$manifest = Join-Path $projectDir 'app.manifest'
 $compilerArgs = @(
     '/nologo'
     '/target:winexe'
     '/optimize+'
     '/platform:x64'
     "/out:$outputFile"
+    "/win32manifest:$manifest"
     '/reference:System.dll'
     '/reference:System.Core.dll'
     '/reference:System.Drawing.dll'

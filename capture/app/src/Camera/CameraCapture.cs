@@ -69,6 +69,7 @@ namespace Acquire
         private readonly bool _saveCloud;
         private readonly int _cloudStride;
         private readonly HashSet<string> _warned = new HashSet<string>();
+        private readonly LatestPreview<CameraPreviewFrame> _preview;
         private readonly List<Pending> _slots = new List<Pending>();
         private readonly Queue<Pending> _queue = new Queue<Pending>();
         private Thread _reader;
@@ -79,6 +80,7 @@ namespace Acquire
         private int _depthIndex;
         private long _dropped;
         private bool _warnedBacklog;
+        private double _lastPreviewRelMs = double.NegativeInfinity;
 
         public CameraCapture(ICameraSource source, TakeWriter take, Action<string> log)
             : this(source, take, log, null, false, DepthCloud.DefaultStride)
@@ -87,6 +89,13 @@ namespace Acquire
 
         public CameraCapture(ICameraSource source, TakeWriter take, Action<string> log,
                              DepthIntrinsics intrinsics, bool saveCloud, int cloudStride)
+            : this(source, take, log, intrinsics, saveCloud, cloudStride, null)
+        {
+        }
+
+        public CameraCapture(ICameraSource source, TakeWriter take, Action<string> log,
+                             DepthIntrinsics intrinsics, bool saveCloud, int cloudStride,
+                             LatestPreview<CameraPreviewFrame> preview)
         {
             _source = source;
             _take = take;
@@ -94,6 +103,7 @@ namespace Acquire
             _intrinsics = intrinsics;
             _saveCloud = saveCloud && intrinsics != null && intrinsics.Valid;
             _cloudStride = cloudStride < 1 ? DepthCloud.DefaultStride : cloudStride;
+            _preview = preview;
             for (int i = 0; i < QueueCapacity; i++) _slots.Add(new Pending());
         }
 
@@ -221,6 +231,7 @@ namespace Acquire
                 try
                 {
                     Fill(slot, frame);
+                    PublishPreview(slot);
                 }
                 catch (Exception ex)
                 {
@@ -236,6 +247,41 @@ namespace Acquire
                 }
             }
             lock (_queueGate) Monitor.PulseAll(_queueGate);
+        }
+
+        private void PublishPreview(Pending slot)
+        {
+            if (_preview == null) return;
+            double relMs = slot.HasColor ? slot.ColorRelMs : slot.DepthRelMs;
+            if (relMs - _lastPreviewRelMs < 90) return;
+            _lastPreviewRelMs = relMs;
+            CameraPreviewFrame preview = new CameraPreviewFrame();
+            if (slot.HasColor)
+            {
+                preview.ColorWidth = slot.ColorWidth;
+                preview.ColorHeight = slot.ColorHeight;
+                preview.ColorRelMs = slot.ColorRelMs;
+                preview.ColorBgr = new byte[slot.Color.Length];
+                Buffer.BlockCopy(slot.Color, 0, preview.ColorBgr, 0, slot.Color.Length);
+            }
+            if (slot.HasDepth)
+            {
+                preview.DepthWidth = slot.DepthWidth;
+                preview.DepthHeight = slot.DepthHeight;
+                preview.DepthRelMs = slot.DepthRelMs;
+                preview.DepthScaleMeters = slot.DepthScale;
+                preview.Depth = new ushort[slot.Depth.Length];
+                Array.Copy(slot.Depth, preview.Depth, slot.Depth.Length);
+                int valid = 0;
+                int sampled = 0;
+                for (int i = 0; i < slot.Depth.Length; i += 16)
+                {
+                    sampled++;
+                    if (slot.Depth[i] > 0) valid++;
+                }
+                preview.ValidDepthRatio = sampled == 0 ? 0 : valid / (double)sampled;
+            }
+            _preview.Publish(preview);
         }
 
         private void Fill(Pending slot, CameraFrame frame)

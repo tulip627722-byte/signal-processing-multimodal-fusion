@@ -25,6 +25,12 @@ namespace Acquire
                 return SelfTestRunner.Run(SelfTestOptions.Parse(args));
             }
 
+            if (HasArg(args, "--preview-stress-test"))
+            {
+                int seconds = SelfTestOptions.ParseInt(ValueOf(args, "--seconds"), 1800);
+                return PreviewStressTest.Run(seconds);
+            }
+
             string verify = ValueOf(args, "--verify-take");
             if (verify != null)
             {
@@ -86,7 +92,20 @@ namespace Acquire
 
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
-            MainForm form = new MainForm();
+            string demoScreenshot = ValueOf(args, "--demo-screenshot");
+            bool demoMode = HasArg(args, "--demo") || !string.IsNullOrEmpty(demoScreenshot);
+            MainForm form = new MainForm(demoMode);
+            if (!string.IsNullOrEmpty(demoScreenshot))
+            {
+                System.Windows.Forms.Timer screenshotTimer = new System.Windows.Forms.Timer { Interval = 7000 };
+                screenshotTimer.Tick += delegate
+                {
+                    screenshotTimer.Stop();
+                    form.SaveScreenshot(Path.GetFullPath(demoScreenshot));
+                    form.Close();
+                };
+                form.Shown += delegate { screenshotTimer.Start(); };
+            }
             if (HasArg(args, "--ui-smoke-test"))
             {
                 System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer { Interval = 1500 };
@@ -336,6 +355,9 @@ private static int IntArg(string[] args, string name, int fallback)
             ConsoleIo.WriteLine("  --capture [--camera 1|null] [--delay 1] [--duration 3] [--label 文本] [--out 目录] [--no-radar] [--cues]");
             ConsoleIo.WriteLine("                                不开界面采一次（验证真机内参档位用）；--cues 开提示音");
             ConsoleIo.WriteLine("  --ui-smoke-test               起界面 1.5 s 后自动关闭（构建自测用）");
+            ConsoleIo.WriteLine("  --demo                        启动四路合成数据演示");
+            ConsoleIo.WriteLine("  --demo-screenshot <png>       运行四路合成采集并保存界面截图");
+            ConsoleIo.WriteLine("  --preview-stress-test [--seconds 1800]  四路最新帧缓冲压力测试");
         }
 
         /// <summary>

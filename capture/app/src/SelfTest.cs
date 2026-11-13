@@ -144,7 +144,9 @@ namespace Acquire
                         PayloadBytes = options.Payload,
                         Camera = synthetic,
                         SelfTest = true,
-                        SaveCloud = true
+                        SaveCloud = true,
+                        LidarEnabled = true,
+                        LidarSynthetic = true
                     };
 
                     using (SessionController controller = new SessionController())
@@ -190,6 +192,8 @@ namespace Acquire
                 foreach (string line in validation.Failed) log("  FAIL  " + line);
 
                 SelfTestRunnerCloud.VerifyClouds(log, takeDir, validation);
+                VerifyRadarPreview(log, validation);
+                VerifyLidar(log, takeDir, validation);
 
                 log("");
                 log(validation.Ok ? "SELF-TEST PASSED" : "SELF-TEST FAILED（" + validation.Failed.Count + " 项）");
@@ -221,6 +225,49 @@ namespace Acquire
             {
                 return ((IPEndPoint)probe.Client.LocalEndPoint).Port;
             }
+        }
+
+        private static void VerifyRadarPreview(Action<string> log, TakeValidation validation)
+        {
+            double[] real = new double[1024];
+            double[] imaginary = new double[1024];
+            const int expected = 80;
+            for (int i = 0; i < real.Length; i++) real[i] = Math.Sin(2 * Math.PI * expected * i / real.Length);
+            RadarPreviewProcessor.Fft(real, imaginary);
+            int peak = 1;
+            double peakValue = 0;
+            for (int i = 1; i < real.Length / 2; i++)
+            {
+                double value = real[i] * real[i] + imaginary[i] * imaginary[i];
+                if (value > peakValue) { peakValue = value; peak = i; }
+            }
+            if (peak == expected) { validation.Pass("实时距离 FFT 已知峰值分箱正确（bin " + peak + "）"); log("  PASS  实时距离 FFT 峰值 bin=" + peak); }
+            else { validation.Fail("实时距离 FFT 峰值错误：期望 " + expected + "，实际 " + peak); log("  FAIL  实时距离 FFT 峰值错误"); }
+        }
+
+        private static void VerifyLidar(Action<string> log, string takeDir, TakeValidation validation)
+        {
+            string directory = Path.Combine(takeDir, "lidar");
+            string[] files = Directory.Exists(directory) ? Directory.GetFiles(directory, "*.bin") : new string[0];
+            if (files.Length == 0) { validation.Fail("lidar 目录没有二进制点云批次"); log("  FAIL  lidar 目录为空"); return; }
+            try
+            {
+                LidarBatch first = LidarBinary.Read(files[0]);
+                if (first.Count > 0 && first.Points != null && first.Points.Length == first.Count)
+                { validation.Pass("LIVOXBIN_V1 可回读（" + files.Length + " 批，首批 " + first.Count + " 点）"); log("  PASS  LiDAR 二进制回读：" + first.Count + " 点"); }
+                else { validation.Fail("LiDAR 二进制回读点数无效"); }
+
+                using (ReplayLidarSource replay = new ReplayLidarSource(directory, delegate { return 123.0; }))
+                {
+                    replay.Open();
+                    LidarBatch replayed = replay.ReadBatch(200);
+                    replay.Close();
+                    if (replayed != null && replayed.Count == first.Count && Math.Abs(replayed.RelMs - 123.0) < 1e-9)
+                    { validation.Pass("LiDAR 回放源读取批次并重建主机时间戳"); log("  PASS  LiDAR 回放源：" + replayed.Count + " 点"); }
+                    else validation.Fail("LiDAR 回放源读取结果不一致");
+                }
+            }
+            catch (Exception ex) { validation.Fail("LiDAR 二进制回读失败：" + ex.Message); log("  FAIL  LiDAR 回读：" + ex.Message); }
         }
     }
 }

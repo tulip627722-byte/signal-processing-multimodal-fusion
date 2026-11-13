@@ -20,6 +20,7 @@ namespace Acquire
         private readonly double _lossRate;
         private readonly double _dropFrameRate;
         private readonly int _maxFrames;
+        private readonly bool _tonePayload;
         private readonly Random _random = new Random(20261026);
         private Thread _thread;
         private volatile bool _running;
@@ -33,6 +34,12 @@ namespace Acquire
         }
 
         public SyntheticRadar(string ip, int port, int packetsPerFrame, int payloadBytes, double fps, double lossRate, double dropFrameRate, int maxFrames)
+            : this(ip, port, packetsPerFrame, payloadBytes, fps, lossRate, dropFrameRate, maxFrames, false)
+        {
+        }
+
+        public SyntheticRadar(string ip, int port, int packetsPerFrame, int payloadBytes, double fps, double lossRate,
+                              double dropFrameRate, int maxFrames, bool tonePayload)
         {
             _target = new IPEndPoint(IPAddress.Parse(ip), port);
             _packetsPerFrame = packetsPerFrame;
@@ -41,6 +48,7 @@ namespace Acquire
             _lossRate = Math.Max(0, Math.Min(0.5, lossRate));
             _dropFrameRate = Math.Max(0, Math.Min(0.9, dropFrameRate));
             _maxFrames = maxFrames;
+            _tonePayload = tonePayload;
         }
 
         public long Sent { get { return Interlocked.Read(ref _sent); } }
@@ -103,7 +111,19 @@ namespace Acquire
                             Interlocked.Increment(ref _dropped);
                             continue;
                         }
-                        for (int k = 0; k < payload.Length; k++) payload[k] = PayloadByte(packetId, k);
+                        if (_tonePayload && payload.Length >= 2048)
+                        {
+                            for (int sample = 0; sample < payload.Length / 2; sample++)
+                            {
+                                int raw = 2048 + (int)(900 * Math.Sin(2 * Math.PI * 80 * sample / 1024.0));
+                                payload[sample * 2] = (byte)(raw & 0xFF);
+                                payload[sample * 2 + 1] = (byte)((raw >> 8) & 0xFF);
+                            }
+                        }
+                        else
+                        {
+                            for (int k = 0; k < payload.Length; k++) payload[k] = PayloadByte(packetId, k);
+                        }
                         byte[] datagram = TinyFrameCodec.BuildAdcPacket(packetId, payload);
                         client.Send(datagram, datagram.Length, _target);
                         Interlocked.Increment(ref _sent);

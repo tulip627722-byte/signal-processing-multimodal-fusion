@@ -30,6 +30,7 @@ namespace Acquire
         public string ColorDirectory { get; private set; }
         public string DepthDirectory { get; private set; }
         public string CloudDirectory { get; private set; }
+        public string LidarDirectory { get; private set; }
 
         public TakeWriter(string rootDirectory, string takeName, Timebase tb)
         {
@@ -40,6 +41,7 @@ namespace Acquire
             ColorDirectory = Path.Combine(Directory, "color");
             DepthDirectory = Path.Combine(Directory, "depth");
             CloudDirectory = Path.Combine(Directory, "cloud");
+            LidarDirectory = Path.Combine(Directory, "lidar");
             System.IO.Directory.CreateDirectory(ColorDirectory);
             System.IO.Directory.CreateDirectory(DepthDirectory);
         }
@@ -89,6 +91,12 @@ namespace Acquire
                 System.IO.Directory.CreateDirectory(CloudDirectory);
         }
 
+        public void EnsureLidarDirectory()
+        {
+            if (!System.IO.Directory.Exists(LidarDirectory))
+                System.IO.Directory.CreateDirectory(LidarDirectory);
+        }
+
         public void WriteDepthScale(double metersPerUnit)
         {
             lock (_gate) _depthScale = metersPerUnit;
@@ -136,7 +144,8 @@ namespace Acquire
             if (stream == "depth") return 1;
             if (stream == "cloud") return 2;
             if (stream == "radar") return 3;
-            return 4;
+            if (stream == "lidar") return 4;
+            return 5;
         }
 
         private void WriteManifest(List<ManifestRow> rows)

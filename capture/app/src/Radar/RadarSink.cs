@@ -95,8 +95,16 @@ namespace Acquire
         private string _packetLogPath;
         private bool _running;
         private readonly RadarSummary _summary = new RadarSummary();
+        private readonly RadarPreviewProcessor _previewProcessor;
+        private bool _previewDisposed;
 
         public RadarSink(TakeWriter take, Timebase tb, int packetsPerFrame, int payloadBytes, Action<string> log)
+            : this(take, tb, packetsPerFrame, payloadBytes, log, null)
+        {
+        }
+
+        public RadarSink(TakeWriter take, Timebase tb, int packetsPerFrame, int payloadBytes, Action<string> log,
+                         LatestPreview<RadarPreviewFrame> preview)
         {
             if (packetsPerFrame <= 0) throw new ArgumentOutOfRangeException("packetsPerFrame");
             if (payloadBytes <= 0) throw new ArgumentOutOfRangeException("payloadBytes");
@@ -106,6 +114,7 @@ namespace Acquire
             _packetsPerFrame = packetsPerFrame;
             _payloadBytes = payloadBytes;
             _record = new byte[12 + payloadBytes];
+            if (preview != null) _previewProcessor = new RadarPreviewProcessor(preview);
         }
 
         public bool IsRunning { get { lock (_gate) return _running; } }
@@ -250,6 +259,8 @@ namespace Acquire
                 long ticks = stamp.LocalTime.Ticks;
                 for (int k = 0; k < chirps; k++)
                 {
+                    if (_previewProcessor != null)
+                        _previewProcessor.AddChirp(frameIndex, packet.Payload, k * _payloadBytes, _payloadBytes, stamp.RelMs);
                     Buffer.BlockCopy(BitConverter.GetBytes(ticks), 0, _record, 0, 8);
                     Buffer.BlockCopy(BitConverter.GetBytes((uint)(logicalBase + k)), 0, _record, 8, 4);
                     Buffer.BlockCopy(packet.Payload, k * _payloadBytes, _record, 12, _payloadBytes);
@@ -276,6 +287,11 @@ namespace Acquire
         public RadarSummary Stop()
         {
             try { _transport.Dispose(); } catch { }
+            if (_previewProcessor != null && !_previewDisposed)
+            {
+                _previewProcessor.Dispose();
+                _previewDisposed = true;
+            }
 
             List<RadarFrameStat> stats;
             long received;
@@ -382,6 +398,7 @@ namespace Acquire
         public void Dispose()
         {
             try { Stop(); } catch { }
+            if (_previewProcessor != null && !_previewDisposed) _previewProcessor.Dispose();
         }
     }
 }

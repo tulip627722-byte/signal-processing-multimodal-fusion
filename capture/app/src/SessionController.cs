@@ -21,6 +21,7 @@ namespace Acquire
         public int DelaySeconds;
         public int DurationSeconds = 10;
         public bool RadarEnabled = true;
+        public bool RadarSynthetic;
         public string LocalIp = "192.168.220.10";
         public int LocalPort = 8080;
         public string BoardIp = "192.168.220.100";
@@ -39,6 +40,11 @@ namespace Acquire
         /// <summary>采集提示音：预备结束一声、拍摄结束一声。默认关，GUI 里默认勾选，自检/批处理保持静音。</summary>
         public bool SoundCues;
         public bool VerboseLog = true;
+        public bool LidarEnabled;
+        public bool LidarSynthetic = true;
+        public string LidarBroadcastCode = "";
+        public string LidarReplayDirectory = "";
+        public string LidarReturnMode = "single";
     }
 
     internal sealed class SessionSnapshot
@@ -62,6 +68,12 @@ namespace Acquire
         public string Error = "";
         public string RadarHealth = "未启动";
         public int RadarRestarts;
+        public long PreviewDropped;
+        public double PreviewLatencyMs;
+        public long LidarBatches;
+        public long LidarPoints;
+        public double LidarFps;
+        public string LidarHealth = "未启动";
     }
 
     /// <summary>
@@ -102,10 +114,16 @@ namespace Acquire
         private string _cameraError = "";
         private string _cameraModeNote = "";
         private RadarSummary _radarSummary;
+        private SyntheticRadar _syntheticRadar;
         private CameraCaptureStats _cameraStats;
         private DateTime _recordStartUtc;
         private DateTime _recordEndUtc;
         private double _actualSeconds;
+        private LidarCapture _lidar;
+        private LidarCaptureStats _lidarStats;
+        private readonly LatestPreview<CameraPreviewFrame> _cameraPreview = new LatestPreview<CameraPreviewFrame>();
+        private readonly LatestPreview<RadarPreviewFrame> _radarPreview = new LatestPreview<RadarPreviewFrame>();
+        private readonly LatestPreview<LidarBatch> _lidarPreview = new LatestPreview<LidarBatch>();
 
         public event Action<string> Log;
 
@@ -126,7 +144,7 @@ namespace Acquire
             if (options.DelaySeconds < 0 || options.DelaySeconds > 60)
                 throw new ArgumentOutOfRangeException("options.DelaySeconds", "延迟应在 0~60 秒");
 
-            if (options.RadarEnabled)
+            if (options.RadarEnabled && !options.RadarSynthetic)
                 options.LocalIp = RadarNetwork.ValidateLocalAddress(options.LocalIp);
 
             Directory.CreateDirectory(options.OutputRoot);
@@ -140,6 +158,7 @@ namespace Acquire
             _takeDirectory = "";
             _radarSummary = null;
             _cameraStats = null;
+            _lidarStats = null;
             _serialCandidates = new List<PortCandidate>();
             _serialCandidateIndex = 0;
             _serialSendsOnCandidate = 0;
@@ -249,10 +268,18 @@ namespace Acquire
 
                 if (o.RadarEnabled)
                 {
-                    EmitLog("雷达网络检查：" + RadarNetwork.Describe(o.LocalIp));
-                    _radar = new RadarSink(_take, _tb, o.PacketsPerFrame, o.PayloadBytes, EmitLog);
+                    if (!o.RadarSynthetic) EmitLog("雷达网络检查：" + RadarNetwork.Describe(o.LocalIp));
+                    _radar = new RadarSink(_take, _tb, o.PacketsPerFrame, o.PayloadBytes, EmitLog, _radarPreview);
                     _radar.Start(o.LocalIp, o.LocalPort, o.BoardIp);
-                    StartSerial(o);
+                    if (o.RadarSynthetic)
+                    {
+                        _syntheticRadar = new SyntheticRadar(o.LocalIp, o.LocalPort, o.PacketsPerFrame,
+                            o.PayloadBytes, 10, 0, 0, 0, true);
+                        _syntheticRadar.Start();
+                        _radarHealth = "合成数据运行";
+                        EmitLog("毫米波雷达使用 UDP 合成源（演示/测试）");
+                    }
+                    else StartSerial(o);
                 }
                 else
                 {
@@ -261,7 +288,7 @@ namespace Acquire
 
                 if (source != null)
                 {
-                    _camera = new CameraCapture(source, _take, EmitLog, _intrinsics, o.SaveCloud, o.CloudStride);
+                    _camera = new CameraCapture(source, _take, EmitLog, _intrinsics, o.SaveCloud, o.CloudStride, _cameraPreview);
                     _camera.Start();
                     if (o.SaveCloud)
                     {
@@ -271,6 +298,20 @@ namespace Acquire
                             EmitLog("点云：每 " + o.CloudStride + "x" + o.CloudStride +
                                     " 像素取 1 点，写入 cloud\\NNNNNN.ply（事后可用 --export-cloud 换 stride 重算）");
                     }
+                }
+
+                if (o.LidarEnabled)
+                {
+                    ILidarSource lidarSource;
+                    if (!string.IsNullOrEmpty(o.LidarReplayDirectory))
+                        lidarSource = new ReplayLidarSource(o.LidarReplayDirectory, delegate { return _tb.ElapsedMs; });
+                    else if (o.LidarSynthetic)
+                        lidarSource = new SyntheticLidarSource(delegate { return _tb.ElapsedMs; });
+                    else
+                        lidarSource = new LivoxNativeSource(o.LidarBroadcastCode, delegate { return _tb.ElapsedMs; });
+                    _lidar = new LidarCapture(lidarSource, _take, _lidarPreview, EmitLog);
+                    _lidar.Start();
+                    EmitLog("LiDAR 启动：" + lidarSource.Model + "，回波模式 " + o.LidarReturnMode);
                 }
 
                 _state = SessionState.Recording;
@@ -285,7 +326,7 @@ namespace Acquire
                 {
                     double elapsed = _tb.ElapsedSeconds;
                     if (elapsed >= o.DurationSeconds) break;
-                    if (_radar != null) MonitorRadar(o, elapsed);
+                    if (_radar != null && !o.RadarSynthetic) MonitorRadar(o, elapsed);
                     if (!cameraRecordingConfirmed && _camera != null)
                     {
                         CameraCaptureStats cameraNow = _camera.Snapshot();
@@ -311,6 +352,7 @@ namespace Acquire
                 if (cues != null) cues.Play(CueKind.End);
                 // 先让板子停下来，再停 UDP
                 StopSerial();
+                if (_syntheticRadar != null) _syntheticRadar.Stop();
                 // 时长与结束时刻在停止任何采集器之前就固定，避免把 MAT 写盘耗时算进采集时长
                 _actualSeconds = _tb.ElapsedSeconds;
                 _recordEndUtc = _tb.UtcFromRelMs(_actualSeconds * 1000.0);
@@ -325,6 +367,11 @@ namespace Acquire
                 {
                     _radarSummary = _radar.Stop();
                 }
+                if (_lidar != null)
+                {
+                    _lidar.Stop();
+                    _lidarStats = _lidar.Snapshot();
+                }
 
                 WriteOutputs(o);
                 _message = "完成：" + Path.GetFileName(_takeDirectory);
@@ -336,6 +383,7 @@ namespace Acquire
                 EmitLog("采集异常：" + _error);
                 _message = "失败：" + _error;
                 try { StopSerial(); } catch { }
+                try { if (_syntheticRadar != null) _syntheticRadar.Stop(); } catch { }
                 TryFinalizeOnError(o);
             }
             finally
@@ -350,6 +398,26 @@ namespace Acquire
                 {
                     try { _serial.Dispose(); } catch { }
                     _serial = null;
+                }
+                if (_syntheticRadar != null)
+                {
+                    try { _syntheticRadar.Dispose(); } catch { }
+                    _syntheticRadar = null;
+                }
+                if (_lidar != null)
+                {
+                    try { _lidar.Dispose(); } catch { }
+                    _lidar = null;
+                }
+                if (_camera != null)
+                {
+                    try { _camera.Dispose(); } catch { }
+                    _camera = null;
+                }
+                if (_radar != null)
+                {
+                    try { _radar.Dispose(); } catch { }
+                    _radar = null;
                 }
                 if (source != null)
                 {
@@ -506,6 +574,11 @@ namespace Acquire
             catch { }
             try
             {
+                if (_lidar != null) { _lidar.Stop(); _lidarStats = _lidar.Snapshot(); }
+            }
+            catch { }
+            try
+            {
                 if (_take != null && _tb != null)
                 {
                     _actualSeconds = _tb.ElapsedSeconds;
@@ -550,6 +623,7 @@ namespace Acquire
 
             JsonObject radarObj = new JsonObject();
             radarObj.Add("enabled", o.RadarEnabled);
+            radarObj.Add("source", o.RadarSynthetic ? "synthetic-udp" : "ADT7880");
             radarObj.Add("packetsPerFrame", o.PacketsPerFrame);
             radarObj.Add("payloadBytes", o.PayloadBytes);
             if (radar != null && o.RadarEnabled)
@@ -584,6 +658,24 @@ namespace Acquire
                 radarObj.Add("matFile", null);
             }
             meta.Add("radar", radarObj);
+
+            LidarCaptureStats lidar = _lidarStats;
+            JsonObject lidarObj = new JsonObject();
+            lidarObj.Add("enabled", o.LidarEnabled);
+            lidarObj.Add("model", !string.IsNullOrEmpty(o.LidarReplayDirectory) ? "Livox binary replay" : (o.LidarSynthetic ? "Livox MID-70 synthetic" : "Livox MID-70"));
+            lidarObj.Add("broadcastCode", string.IsNullOrEmpty(o.LidarBroadcastCode) ? null : (object)o.LidarBroadcastCode);
+            lidarObj.Add("returnMode", o.LidarReturnMode);
+            lidarObj.Add("source", !string.IsNullOrEmpty(o.LidarReplayDirectory) ? "replay" : (o.LidarSynthetic ? "synthetic" : "Livox-SDK"));
+            lidarObj.Add("batches", lidar == null ? 0 : lidar.Batches);
+            lidarObj.Add("points", lidar == null ? 0 : lidar.Points);
+            lidarObj.Add("fps", lidar == null ? 0 : Math.Round(lidar.Fps, 3));
+            lidarObj.Add("bytes", lidar == null ? 0 : lidar.Bytes);
+            lidarObj.Add("dir", lidar != null && lidar.Batches > 0 ? "lidar" : null);
+            lidarObj.Add("format", "LIVOXBIN_V1: sequence, host t_rel_ms, device timestamp raw64, XYZ float32 + reflectivity uint8");
+            lidarObj.Add("coordinateFrame", "sensor: X right, Y up, Z forward");
+            lidarObj.Add("timeSync", o.LidarSynthetic || !string.IsNullOrEmpty(o.LidarReplayDirectory) ? "shared host Stopwatch" : "host receive time; device timestamp_type/PTP/PPS pending hardware validation");
+            lidarObj.Add("error", lidar == null || string.IsNullOrEmpty(lidar.Error) ? null : (object)lidar.Error);
+            meta.Add("lidar", lidarObj);
 
         JsonObject serialObj = new JsonObject();
         serialObj.Add("enabled", o.RadarEnabled);
@@ -676,6 +768,8 @@ namespace Acquire
                 warnings.Add("勾选了“同时存点云”，但没有写出任何 cloud\\*.ply（无可用内参或写入失败）");
             if (cam != null && cam.DroppedFrames > 0)
                 warnings.Add("写图队列丢帧 " + cam.DroppedFrames + " 帧（落盘跟不上，可检查磁盘/杀毒扫描）");
+            if (o.LidarEnabled && !o.LidarSynthetic && (lidar == null || lidar.Batches == 0))
+                warnings.Add("MID-70 真机未采到点云；需要 LivoxBridge.dll、官方 Livox-SDK 与设备联调");
             if (_error.Length > 0) warnings.Add("会话异常：" + _error);
             meta.Add("warnings", warnings);
             meta.Add("error", _error.Length > 0 ? _error : null);
@@ -738,8 +832,24 @@ namespace Acquire
                 s.CloudFrames = stats.CloudFrames;
                 s.CloudPoints = stats.CloudPoints;
             }
+            LidarCapture lidarCapture = _lidar;
+            LidarCaptureStats lidarNow = lidarCapture == null ? _lidarStats : lidarCapture.Snapshot();
+            if (lidarNow != null)
+            {
+                s.LidarBatches = lidarNow.Batches;
+                s.LidarPoints = lidarNow.Points;
+                s.LidarFps = lidarNow.Fps;
+                s.LidarHealth = lidarNow.State;
+            }
+            s.PreviewDropped = _cameraPreview.Overwritten + _radarPreview.Overwritten + _lidarPreview.Overwritten;
+            s.PreviewLatencyMs = Math.Max(_cameraPreview.LastTakeLatencyMs,
+                Math.Max(_radarPreview.LastTakeLatencyMs, _lidarPreview.LastTakeLatencyMs));
             return s;
         }
+
+        public CameraPreviewFrame TakeCameraPreview() { return _cameraPreview.Take(); }
+        public RadarPreviewFrame TakeRadarPreview() { return _radarPreview.Take(); }
+        public LidarBatch TakeLidarPreview() { return _lidarPreview.Take(); }
 
         private void EmitLog(string text)
         {

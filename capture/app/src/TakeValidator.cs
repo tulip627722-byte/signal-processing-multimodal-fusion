@@ -125,9 +125,10 @@ namespace Acquire
             bool colorRequired = GetBool(GetObject(meta, "color"), "available", true);
             bool depthRequired = GetBool(GetObject(meta, "depth"), "available", true);
             bool radarRequired = GetBool(GetObject(meta, "radar"), "enabled", true);
-            foreach (string stream in new[] { "radar", "color", "depth" })
+            bool lidarRequired = GetBool(GetObject(meta, "lidar"), "enabled", false);
+            foreach (string stream in new[] { "radar", "color", "depth", "lidar" })
             {
-                bool required = stream == "radar" ? radarRequired : (stream == "color" ? colorRequired : depthRequired);
+                bool required = stream == "radar" ? radarRequired : (stream == "lidar" ? lidarRequired : (stream == "color" ? colorRequired : depthRequired));
                 if (required) v.Require(byStream.ContainsKey(stream), "manifest 含 " + stream + " 流");
                 else v.Note("manifest 无 " + stream + " 流（meta 标记该路未启用或无数据）");
             }
@@ -167,6 +168,7 @@ namespace Acquire
             JsonObject radarObj = GetObject(meta, "radar");
             JsonObject cameraObj = GetObject(meta, "camera");
             JsonObject timebaseObj = GetObject(meta, "timebase");
+            JsonObject lidarObj = GetObject(meta, "lidar");
 
             v.Require(GetString(meta, "format", "") == "ACQUIRE_TAKE_V1", "meta.format = ACQUIRE_TAKE_V1");
             v.Require(GetDouble(timebaseObj, "frequencyHz", 0) > 0, "meta.timebase.frequencyHz > 0");
@@ -241,6 +243,7 @@ namespace Acquire
 
             ValidateIntrinsics(v, cameraObj, depthObj, depthExpected);
             ValidateCloud(v, takeDir, depthObj, byStream);
+            ValidateLidar(v, takeDir, lidarObj, byStream);
 
             // ---------------- 雷达：MAT + radar_frames.csv ----------------
             long received = (long)GetDouble(radarObj, "receivedPackets", -1);
@@ -464,6 +467,36 @@ namespace Acquire
                 }
                 v.Require(matched, "每个 cloud 行都与同号 depth 行的时间戳一致（点云取自同一帧）");
             }
+        }
+
+        private static void ValidateLidar(TakeValidation v, string takeDir, JsonObject lidarObj,
+                                          Dictionary<string, List<ManifestEntry>> byStream)
+        {
+            if (!GetBool(lidarObj, "enabled", false))
+            {
+                v.Note("本次未启用 LiDAR");
+                return;
+            }
+            string directory = Path.Combine(takeDir, "lidar");
+            string[] files = Directory.Exists(directory) ? Directory.GetFiles(directory, "*.bin") : new string[0];
+            Array.Sort(files, StringComparer.Ordinal);
+            int batches = (int)GetDouble(lidarObj, "batches", -1);
+            long expectedPoints = (long)GetDouble(lidarObj, "points", -1);
+            v.Require(files.Length > 0, "lidar 目录有二进制批次（" + files.Length + " 个）");
+            v.Require(files.Length == batches, "lidar 文件数 = meta.lidar.batches（" + files.Length + "）");
+            long points = 0;
+            bool readable = true;
+            string error = "";
+            foreach (string file in files)
+            {
+                try { points += LidarBinary.Read(file).Count; }
+                catch (Exception ex) { readable = false; error = Path.GetFileName(file) + "：" + ex.Message; break; }
+            }
+            v.Require(readable, readable ? "每个 lidar/*.bin 的版本头与点记录可回读" : "LiDAR 文件校验失败：" + error);
+            if (readable) v.Require(points == expectedPoints, "LiDAR 点数合计 " + points + " = meta.lidar.points");
+            List<ManifestEntry> rows;
+            if (!byStream.TryGetValue("lidar", out rows)) v.Fail("manifest 里没有 lidar 流");
+            else v.Require(rows.Count == files.Length, "manifest 中 lidar 行数 = lidar 文件数（" + rows.Count + "）");
         }
 
         private static string Fmt(double value)
