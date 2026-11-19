@@ -1,30 +1,40 @@
 function view_take(resFile, varargin)
-%VIEW_TAKE 三画面播放器：左毫米波点云 / 中深度点云 / 右彩色视频
+%VIEW_TAKE 多模态播放器：毫米波 / 深度 / MID-70 / 三路融合
 %
 %   view_take                 % 先弹窗列出所有算好的数据，选一个再播
-%   view_take('..._res.mat')  % 直接指定
+%   view_take('..._res.mat')  % 直接指定，默认从采集中间帧开始
+%   view_take('..._res.mat', 'frame', 1) % 明确查看录制开场帧
+%   view_take('..._res.mat', 'lidarWindowMs', 300) % LiDAR 累计时间窗
+%   view_take('..._res.mat', 'lidarExtrinsicsFile', '...json')
 %
 % 操作：
 %   播放/暂停   ⏵ 按钮，或空格
 %   逐帧        ◀ ▶ 按钮，或 ← →
 %   速度        下拉框 0.5x / 1x / 2x / 3x / 5x
-%   旋转        鼠标拖拽或 rotate3d —— 左右两个点云同步
+%   旋转        鼠标拖拽或 rotate3d —— 四个点云视角同步
 %   缩放        滚轮或 zoom —— 各自独立，不影响视频
 %   锁定视角    勾上后每帧都按当前角度画
 %   重置视角    按钮，或按 R
 %
-% 说明：彩色只做视频看动作，不再往深度点云上贴色（那需要相机标定，先放一放）。
-%       中间的点云按距离着色，近亮远暗。
+% 说明：深度点云和 MID-70 都转换到 ADT7880 坐标后显示；第四窗格为三路
+%       统一坐标的 3D 叠加，不使用 RGB 图像或相机工厂标定。
 
+here = fileparts(mfilename('fullpath'));
 ip = inputParser;
-ip.addParameter('frame', 1);
+ip.addParameter('frame', [], @(v) isempty(v) || ...
+    (isnumeric(v) && isscalar(v) && isfinite(v)));
 ip.addParameter('save', '');
 ip.addParameter('vmin', 0);
+ip.addParameter('lidarWindowMs', 300, @(v) isnumeric(v) && isscalar(v) && v > 0);
+ip.addParameter('maxLidarDisplayPoints', 30000, @is_positive_integer);
+ip.addParameter('maxFusionLidarPoints', 12000, @is_positive_integer);
+ip.addParameter('maxFusionDepthPoints', 8000, @is_positive_integer);
+ip.addParameter('lidarExtrinsicsFile', default_lidar_extrinsics_file(here));
 ip.parse(varargin{:});
 p = ip.Results;
 
-here = fileparts(mfilename('fullpath'));
 addpath(fullfile(here, 'algorithm', 'lib'), '-begin');   % pctile 在这里
+addpath(fullfile(here, 'lidar'), '-begin');
 resDir = paths().takesDir;
 
 if nargin < 1 || isempty(resFile)
@@ -36,8 +46,16 @@ if nargin < 1 || isempty(resFile)
 end
 
 S = load(resFile);
+S.metaOut.takeDir = resolve_take_dir(S.metaOut.takeDir, S.metaOut.takeName, resDir);
+validate_full_result(S, resFile);
 n = numel(S.frames);
-k = max(1, min(n, p.frame));
+if isempty(p.frame)
+    % 录制开头常包含人员搬动标定板或目标尚未就位的过渡帧。
+    % 保留全部原始帧，但默认打开采集中间，避免把开场位置误当测距错误。
+    k = round((n + 1) / 2);
+else
+    k = max(1, min(n, round(p.frame)));
+end
 
 st = struct();
 st.k = k; st.n = n; st.playing = false; st.speed = 1.0;
@@ -45,13 +63,18 @@ st.lockView = false; st.view = [-32 22];
 st.lastView = [nan nan; nan nan];
 st.baseInterval = 0.25;
 st.xlim = [-3 3]; st.ylim = [0 9]; st.zlim = [-1.4 1.6];st.cmap = lines(20);
-st.imgCache = struct('frame', -1, 'img', []);
+st.lidar = lidar_index(S, p.lidarWindowMs);
+st.lidar = configure_lidar_extrinsics(st.lidar, p.lidarExtrinsicsFile);
+st.fusionAvailable = st.lidar.available && st.lidar.extrinsicsAvailable;
+st.maxLidarDisplayPoints = p.maxLidarDisplayPoints;
+st.maxFusionLidarPoints = p.maxFusionLidarPoints;
+st.maxFusionDepthPoints = p.maxFusionDepthPoints;
 st.vmin = p.vmin;                 % 雷达最小速度（m/s），0 = 全部显示
 st.xShift = 0;                    % 显示层的 X 平移（m），用于快速试偏移量
 st.crange = depth_crange(S);      % 固定色标范围，避免播放时颜色闪
 st.lim = auto_limits(S);          % 根据数据定范围，画面才不空
 st.picks = {};                    % 取点记录（最多两个）
-st.curP = []; st.curLab = []; st.curD = [];
+st.curP = []; st.curLab = []; st.curD = []; st.curL = []; st.curLR = [];
 st.txtPick = []; st.dcm = []; btnPick = [];
 
 vis = 'off';
@@ -61,11 +84,20 @@ fig = figure('Visible', vis, 'Color', 'w', 'Units', 'normalized', ...
     'Position', [0.03 0.07 0.94 0.86], 'NumberTitle', 'off', ...
     'Name', ['3.0 点云播放器 — ' S.metaOut.takeName], 'MenuBar', 'figure', 'ToolBar', 'figure');
 
-ax1 = axes('Parent', fig, 'Units', 'normalized', 'Position', [0.03 0.20 0.30 0.75]);
-ax2 = axes('Parent', fig, 'Units', 'normalized', 'Position', [0.35 0.20 0.30 0.75]);
-ax3 = axes('Parent', fig, 'Units', 'normalized', 'Position', [0.68 0.20 0.30 0.75]);
+if st.lidar.available
+    ax1 = axes('Parent', fig, 'Units', 'normalized', 'Position', [0.02 0.57 0.46 0.36]);
+    ax2 = axes('Parent', fig, 'Units', 'normalized', 'Position', [0.52 0.57 0.46 0.36]);
+    ax3 = axes('Parent', fig, 'Units', 'normalized', 'Position', [0.02 0.19 0.46 0.34]);
+    ax4 = axes('Parent', fig, 'Units', 'normalized', 'Position', [0.52 0.19 0.46 0.34]);
+else
+    ax1 = axes('Parent', fig, 'Units', 'normalized', 'Position', [0.03 0.20 0.30 0.75]);
+    ax2 = axes('Parent', fig, 'Units', 'normalized', 'Position', [0.35 0.20 0.30 0.75]);
+    ax3 = axes('Parent', fig, 'Units', 'normalized', 'Position', [0.68 0.20 0.30 0.75]);
+    ax4 = [];
+end
 
-hNoise = []; hClu = gobjects(20, 1); hDep = []; hRadarOverlay = []; hImg = [];
+hNoise = []; hClu = gobjects(20, 1); hDep = []; hRadarOverlay = []; hLidar = [];
+hFusionRadar = []; hFusionDepth = []; hFusionLidar = [];
 sld = []; btnPlay = []; txtInfo = [];
 
 build_axes();
@@ -114,8 +146,28 @@ set(fig, 'WindowScrollWheelFcn', @(src, ev) onWheel(ev));
         xlabel(ax1, 'X (m)'); ylabel(ax1, 'Y (m)'); zlabel(ax1, 'Z (m)');
         xlabel(ax2, 'X (m)'); ylabel(ax2, 'Y (m)'); zlabel(ax2, 'Z (m)');
         title(ax1, '毫米波点云');
-        title(ax2, '深度点云 + 雷达叠加');
-        title(ax3, '彩色视频');
+        title(ax2, '深度相机点云（雷达坐标）');
+        if st.lidar.available
+            set(ax3, 'XLim', st.lidar.lim{1}, 'YLim', st.lidar.lim{2}, 'ZLim', st.lidar.lim{3}, ...
+                     'XLimMode', 'manual', 'YLimMode', 'manual', 'ZLimMode', 'manual', ...
+                     'DataAspectRatio', [1 1 1], 'DataAspectRatioMode', 'manual', ...
+                     'View', [-35 22], 'Box', 'on', 'GridAlpha', 0.15);
+            xlabel(ax3, 'X 前 (m)'); ylabel(ax3, 'Y 左 (m)'); zlabel(ax3, 'Z 上 (m)');
+            title(ax3, 'MID-70 激光点云（原生坐标）');
+            hold(ax3, 'on');
+            hLidar = scatter3(NaN, NaN, NaN, 3, NaN, 'filled', 'Parent', ax3, ...
+                'MarkerEdgeColor', 'none');
+            colormap(ax3, turbo);
+            set(ax4, 'XLim', st.xlim, 'YLim', st.ylim, 'ZLim', st.zlim, ...
+                'XLimMode', 'manual', 'YLimMode', 'manual', 'ZLimMode', 'manual', ...
+                'DataAspectRatio', [1 1 1], 'DataAspectRatioMode', 'manual', ...
+                'View', st.view, 'Box', 'on', 'GridAlpha', 0.15);
+            xlabel(ax4, 'X (m)'); ylabel(ax4, 'Y (m)'); zlabel(ax4, 'Z (m)');
+            hold(ax4, 'on');
+            title(ax4, '三路叠加（统一 ADT7880 坐标）');
+        else
+            title(ax3, 'MID-70 不可用');
+        end
 
         hold(ax1, 'on'); hold(ax2, 'on');
         hNoise = scatter3(NaN, NaN, NaN, 8, [0.75 0.75 0.75], 'filled', 'Parent', ax1);
@@ -128,8 +180,17 @@ set(fig, 'WindowScrollWheelFcn', @(src, ev) onWheel(ev));
             'LineWidth', 1.2, 'Parent', ax2);
         colormap(ax2, parula);
 
-        hImg = imshow(zeros(48, 64, 3, 'uint8'), 'Parent', ax3);
-        axis(ax3, 'image'); axis(ax3, 'off');
+        if st.lidar.available
+            hFusionDepth = scatter3(ax4, NaN, NaN, NaN, 4, [0.10 0.72 0.25], 'filled', ...
+                'MarkerFaceAlpha', 0.22, 'MarkerEdgeColor', 'none');
+            hFusionLidar = scatter3(ax4, NaN, NaN, NaN, 5, [0.05 0.32 0.95], 'filled', ...
+                'MarkerFaceAlpha', 0.48, 'MarkerEdgeColor', 'none');
+            hFusionRadar = scatter3(ax4, NaN, NaN, NaN, 42, [0.95 0.05 0.03], 'o', ...
+                'LineWidth', 1.5);
+            legend(ax4, [hFusionDepth hFusionLidar hFusionRadar], ...
+                {'深度', 'MID-70', '毫米波'}, 'Location', 'southoutside', ...
+                'Orientation', 'horizontal');
+        end
         rotate3d(fig, 'on');
     end
 
@@ -263,7 +324,7 @@ set(fig, 'WindowScrollWheelFcn', @(src, ev) onWheel(ev));
                 S.frames(idx), size(P, 1), S.nClusters(idx)));
         end
 
-        % ---- 中：深度点云（按距离着色）----
+        % ---- 深度点云（按距离着色）----
         D = double(S.depthPts{idx});
         if isempty(D)
             set(hDep, 'XData', NaN, 'YData', NaN, 'ZData', NaN, 'CData', NaN);
@@ -271,49 +332,76 @@ set(fig, 'WindowScrollWheelFcn', @(src, ev) onWheel(ev));
             set(hDep, 'XData', D(:, 1), 'YData', D(:, 2), 'ZData', D(:, 3), 'CData', D(:, 2));
             caxis(ax2, st.crange);
         end
-        if isempty(P)
-            set(hRadarOverlay, 'XData', NaN, 'YData', NaN, 'ZData', NaN);
-        else
-            set(hRadarOverlay, 'XData', P(:, 1), 'YData', P(:, 2), 'ZData', P(:, 3));
-        end
-        title(ax2, sprintf('同一雷达坐标系：深度 %d 点 + 雷达 %d 点（红圈）', ...
-            size(D, 1), size(P, 1)));
+        set(hRadarOverlay, 'XData', NaN, 'YData', NaN, 'ZData', NaN);
+        title(ax2, sprintf('深度相机点云   帧 %d   %d 点', S.depthFrame(idx), size(D, 1)));
 
-        % ---- 右：彩色视频 ----
-        img = color_image(idx);
-        if ~isempty(img)
-            set(hImg, 'CData', img);
+        % ---- MID-70：以当前雷达帧为中心累计指定时间窗 ----
+        L = zeros(0, 3);
+        LR = zeros(0, 3);
+        reflectivity = zeros(0, 1);
+        if st.lidar.available
+            rowIndices = st.lidar.rowsForFrame{idx};
+            for rowIndex = rowIndices(:).'
+                if isempty(st.lidar.pointsCache{rowIndex})
+                    batch = read_livox_bin(st.lidar.files{rowIndex});
+                    st.lidar.pointsCache{rowIndex} = double(batch.points);
+                    st.lidar.reflectivityCache{rowIndex} = double(batch.reflectivity);
+                    if st.lidar.extrinsicsAvailable
+                        st.lidar.radarPointsCache{rowIndex} = transform_lidar_points( ...
+                            st.lidar.pointsCache{rowIndex}, st.lidar.extrinsics);
+                    end
+                end
+                L = [L; st.lidar.pointsCache{rowIndex}]; %#ok<AGROW>
+                reflectivity = [reflectivity; st.lidar.reflectivityCache{rowIndex}]; %#ok<AGROW>
+                if st.lidar.extrinsicsAvailable
+                    LR = [LR; st.lidar.radarPointsCache{rowIndex}]; %#ok<AGROW>
+                end
+            end
+            if ~isempty(L)
+                displayIndices = display_sample_indices(size(L, 1), st.maxLidarDisplayPoints);
+                set(hLidar, 'XData', L(displayIndices, 1), 'YData', L(displayIndices, 2), ...
+                    'ZData', L(displayIndices, 3), 'CData', reflectivity(displayIndices));
+            else
+                set(hLidar, 'XData', NaN, 'YData', NaN, 'ZData', NaN, 'CData', NaN);
+            end
+            if st.lidar.valid(idx)
+                deltaText = sprintf('Δt %+.1f ms', st.lidar.dtMs(idx));
+            else
+                deltaText = sprintf('Δt %+.1f ms（偏大）', st.lidar.dtMs(idx));
+            end
+            if isempty(rowIndices)
+                batchText = '-';
+            else
+                batchText = sprintf('%d–%d', st.lidar.batches(rowIndices(1)), ...
+                    st.lidar.batches(rowIndices(end)));
+            end
+            title(ax3, sprintf('MID-70  %.0f ms  %d 点  %s', ...
+                st.lidar.windowMs, size(L, 1), deltaText));
         end
-        title(ax3, sprintf('彩色视频   帧 %d   Δt %+.1f ms', S.colorFrame(idx), S.depthDt(idx)));
+
+        if st.lidar.available
+            render_fusion_3d(D, P, LR, idx);
+        else
+            title(ax3, 'MID-70 不可用');
+        end
 
         if st.lockView
             set(ax1, 'View', st.view);
             set(ax2, 'View', st.view);
+            if st.lidar.available
+                set(ax3, 'View', st.view);
+                set(ax4, 'View', st.view);
+            end
         end
 
         % 供"取点"用：记住当前帧实际画出来的点
-        st.curP = P; st.curLab = lab; st.curD = D;
+        st.curP = P; st.curLab = lab; st.curD = D; st.curL = L; st.curLR = LR;
 
         if ~isempty(sld), set(sld, 'Value', idx); end
         if ~isempty(txtInfo)
             set(txtInfo, 'String', sprintf('帧 %d / %d   %.0f ms', idx, st.n, S.ms(idx)));
         end
         drawnow limitrate;
-    end
-
-    function C = color_image(idx)
-        C = [];
-        if idx < 1 || idx > st.n, return; end
-        fno = S.colorFrame(idx);
-        if fno <= 0, return; end
-        if st.imgCache.frame == fno && ~isempty(st.imgCache.img)
-            C = st.imgCache.img;
-            return;
-        end
-        pth = fullfile(S.metaOut.takeDir, 'color', sprintf('%06d.png', fno));
-        if ~isfile(pth), return; end
-        C = imread(pth);
-        st.imgCache = struct('frame', fno, 'img', C);
     end
 
     function setVmin(v)
@@ -356,6 +444,8 @@ set(fig, 'WindowScrollWheelFcn', @(src, ev) onWheel(ev));
         pos = ev.Position;
         if isempty(st.curD), st.curD = zeros(0,3); end
         if isempty(st.curP), st.curP = zeros(0,6); end
+        if isempty(st.curL), st.curL = zeros(0,3); end
+        if isempty(st.curLR), st.curLR = zeros(0,3); end
 
         if (isequal(axT, ax1) || isequal(ev.Target, hRadarOverlay)) && ~isempty(st.curP)
             d = sum((st.curP(:,1:3) - pos).^2, 2);
@@ -370,6 +460,12 @@ set(fig, 'WindowScrollWheelFcn', @(src, ev) onWheel(ev));
             end
             s = struct('kind', '雷达', 'p', p, 'v', st.curP(i,6), 'clu', cid, ...
                        'rng', st.curP(i,5), 'cen', cen, 'ncl', ncl);
+        elseif st.lidar.available && isequal(axT, ax3) && ~isempty(st.curL)
+            d = sum((st.curL(:,1:3) - pos).^2, 2);
+            [~, i] = min(d);
+            p = st.curL(i, 1:3);
+            s = struct('kind', '激光', 'p', p, 'v', NaN, 'clu', NaN, 'rng', norm(p), ...
+                       'cen', [NaN NaN NaN], 'ncl', 0);
         elseif ~isempty(st.curD)
             d = sum((st.curD(:,1:3) - pos).^2, 2);
             [~, i] = min(d);
@@ -468,6 +564,10 @@ set(fig, 'WindowScrollWheelFcn', @(src, ev) onWheel(ev));
         if st.lockView
             st.view = get(ax1, 'View');
             set(ax2, 'View', st.view);
+            if st.lidar.available
+                set(ax3, 'View', st.view);
+                set(ax4, 'View', st.view);
+            end
         end
     end
 
@@ -477,6 +577,10 @@ set(fig, 'WindowScrollWheelFcn', @(src, ev) onWheel(ev));
         if ~isempty(h), set(h, 'Value', 0); end
         st.view = [-32 22];
         set(ax1, 'View', st.view); set(ax2, 'View', st.view);
+        if st.lidar.available
+            set(ax3, 'View', st.view);
+            set(ax4, 'View', st.view);
+        end
         set(ax1, 'XLim', st.xlim, 'YLim', st.ylim, 'ZLim', st.zlim, ...
                  'DataAspectRatio', [1 1 1], 'DataAspectRatioMode', 'manual');
         set(ax2, 'XLim', st.xlim, 'YLim', st.ylim, 'ZLim', st.zlim, ...
@@ -485,17 +589,23 @@ set(fig, 'WindowScrollWheelFcn', @(src, ev) onWheel(ev));
 
     function sync_view()
         if ~ishandle(ax1) || ~ishandle(ax2), return; end
-        v1 = get(ax1, 'View');
-        v2 = get(ax2, 'View');
-        c1 = any(abs(v1 - st.lastView(1, :)) > 1e-6);
-        c2 = any(abs(v2 - st.lastView(2, :)) > 1e-6);
-        if c1 && ~c2
-            set(ax2, 'View', v1); v2 = v1;
-        elseif c2 && ~c1
-            set(ax1, 'View', v2); v1 = v2;
+        axesList = [ax1 ax2];
+        if st.lidar.available, axesList = [axesList ax3 ax4]; end
+        views = cell2mat(arrayfun(@(a) get(a, 'View'), axesList, 'UniformOutput', false).');
+        if size(st.lastView, 1) ~= size(views, 1)
+            st.lastView = repmat(views(1,:), size(views,1), 1);
         end
-        st.lastView = [v1; v2];
-        if st.lockView, st.view = v1; end
+        if any(abs(views(1,:) - st.lastView(1,:)) > 1e-6)
+            targetView = views(1,:);
+        else
+            changed = find(any(abs(views - st.lastView(1:size(views,1),:)) > 1e-6, 2), 1);
+            if isempty(changed), targetView = views(1,:); else, targetView = views(changed,:); end
+        end
+        for axisHandle = axesList
+            set(axisHandle, 'View', targetView);
+        end
+        st.lastView = repmat(targetView, size(views,1), 1);
+        if st.lockView, st.view = targetView; end
     end
 
     function onKey(ev)
@@ -515,6 +625,12 @@ set(fig, 'WindowScrollWheelFcn', @(src, ev) onWheel(ev));
         p1 = get(ax1, 'Position'); p2 = get(ax2, 'Position');
         if pt(1) >= p1(1) && pt(1) <= p1(1) + p1(3), ax = ax1; end
         if pt(1) >= p2(1) && pt(1) <= p2(1) + p2(3), ax = ax2; end
+        if st.lidar.available
+            p3 = get(ax3, 'Position');
+            if pt(1) >= p3(1) && pt(1) <= p3(1) + p3(3), ax = ax3; end
+            p4 = get(ax4, 'Position');
+            if pt(1) >= p4(1) && pt(1) <= p4(1) + p4(3), ax = ax4; end
+        end
         if isempty(ax), return; end
         f = 0.90 ^ double(ev.VerticalScrollCount);
         xl = get(ax, 'XLim'); yl = get(ax, 'YLim'); zl = get(ax, 'ZLim');
@@ -533,6 +649,204 @@ set(fig, 'WindowScrollWheelFcn', @(src, ev) onWheel(ev));
         end
         delete(fig);
     end
+
+    function render_fusion_3d(D, P, LR, idx)
+        if ~st.fusionAvailable
+            set_fusion_cloud(hFusionDepth, zeros(0, 3));
+            set_fusion_cloud(hFusionLidar, zeros(0, 3));
+            set_fusion_cloud(hFusionRadar, zeros(0, 3));
+            title(ax4, '三路叠加：未启用有效 MID-70→雷达外参');
+            return;
+        end
+        depthRadar = D(:, 1:min(3, size(D, 2)));
+        radarPoints = P(:, 1:min(3, size(P, 2)));
+        depthDisplay = display_sample(depthRadar, st.maxFusionDepthPoints);
+        lidarDisplay = display_sample(LR, st.maxFusionLidarPoints);
+        set_fusion_cloud(hFusionDepth, depthDisplay);
+        set_fusion_cloud(hFusionLidar, lidarDisplay);
+        set_fusion_cloud(hFusionRadar, radarPoints);
+        title(ax4, sprintf('三路融合  帧 %d   雷达 %d / 深度 %d / MID-70 %d', ...
+            S.frames(idx), size(radarPoints, 1), size(depthRadar, 1), size(LR, 1)));
+    end
+
+    function set_fusion_cloud(handle, points)
+        if isempty(points)
+            set(handle, 'XData', NaN, 'YData', NaN, 'ZData', NaN);
+        else
+            set(handle, 'XData', points(:,1), 'YData', points(:,2), 'ZData', points(:,3));
+        end
+    end
+end
+
+function points = display_sample(points, maximumCount)
+indices = display_sample_indices(size(points, 1), maximumCount);
+points = points(indices, :);
+end
+
+function indices = display_sample_indices(count, maximumCount)
+if count <= maximumCount
+    indices = (1:count).';
+else
+    indices = unique(round(linspace(1, count, maximumCount))).';
+end
+end
+
+function valid = is_positive_integer(value)
+valid = isnumeric(value) && isscalar(value) && isfinite(value) && ...
+    value >= 1 && value == round(value);
+end
+
+% ================================================================
+function info = lidar_index(S, windowMs)
+%以处理结果中的雷达时间为中心，选择最近 MID-70 批次或短时间窗。
+n = numel(S.frames);
+info = struct('available', false, 'batchForFrame', zeros(n, 1), ...
+    'rowsForFrame', {cell(n, 1)}, 'dtMs', nan(n, 1), 'valid', false(n, 1), ...
+    'files', {{}}, 'batches', [], 'windowMs', windowMs, ...
+    'pointsCache', {{}}, 'reflectivityCache', {{}}, 'radarPointsCache', {{}}, ...
+    'extrinsicsAvailable', false, 'extrinsics', struct(), ...
+    'lim', {{[-3 3], [0 9], [-1.4 1.6]}});
+try
+    takeDir = S.metaOut.takeDir;
+    csvPath = fullfile(takeDir, 'lidar_frames.csv');
+    lidarDir = fullfile(takeDir, 'lidar');
+    if ~isfile(csvPath) || ~isfolder(lidarDir), return; end
+    rows = readtable(csvPath, 'TextType', 'string');
+    if isempty(rows), return; end
+    lidarTime = (double(rows.first_t_rel_ms) + double(rows.last_t_rel_ms)) / 2;
+    batches = double(rows.batch);
+    if ismember('file', rows.Properties.VariableNames)
+        files = cellstr(rows.file);
+    else
+        files = arrayfun(@(v) fullfile('lidar', sprintf('%06d.bin', v)), ...
+            batches, 'UniformOutput', false);
+    end
+    resolvedFiles = cell(size(files));
+    for rowIndex = 1:numel(files)
+        path = char(files{rowIndex});
+        if ~isfile(path), path = fullfile(takeDir, strrep(path, '/', filesep)); end
+        resolvedFiles{rowIndex} = path;
+    end
+    info.files = resolvedFiles;
+    info.batches = batches;
+    info.pointsCache = cell(numel(files), 1);
+    info.reflectivityCache = cell(numel(files), 1);
+    info.radarPointsCache = cell(numel(files), 1);
+    for idx = 1:n
+        [delta, nearest] = min(abs(lidarTime - double(S.radarT(idx))));
+        info.batchForFrame(idx) = batches(nearest);
+        info.dtMs(idx) = lidarTime(nearest) - double(S.radarT(idx));
+        info.valid(idx) = delta <= 30;
+        if windowMs <= 100
+            info.rowsForFrame{idx} = nearest;
+        else
+            windowStart = double(S.radarT(idx)) - windowMs;
+            windowEnd = double(S.radarT(idx));
+            info.rowsForFrame{idx} = find(lidarTime >= windowStart & lidarTime <= windowEnd).';
+        end
+        if isempty(info.rowsForFrame{idx}), info.rowsForFrame{idx} = nearest; end
+    end
+    info.available = all(cellfun(@isfile, info.files));
+    if info.available, info.lim = lidar_limits(info.files); end
+catch ex
+    warning('view_take:LiDARUnavailable', 'LiDAR 未载入：%s', ex.message);
+end
+end
+
+function takeDir = resolve_take_dir(takeDir, takeName, resultsTakesDir)
+takeDir = char(takeDir);
+if isfolder(takeDir), return; end
+takeDir = '';
+try
+    projectPaths = paths();
+    candidate = fullfile(projectPaths.captureTakes, char(takeName));
+    if isfolder(candidate), takeDir = candidate; return; end
+catch
+end
+candidate = fullfile(fileparts(resultsTakesDir), '..', '..', char(takeName));
+if isfolder(candidate), takeDir = candidate; end
+end
+
+function validate_full_result(S, resFile)
+if isfield(S, 'metaOut') && isfield(S.metaOut, 'isPartial') && logical(S.metaOut.isPartial)
+    error('view_take:PartialResult', ...
+        '拒绝播放抽样结果：%s（%d/%d 帧）。请运行 compute_all 强制完整重算。', ...
+        resFile, S.metaOut.processedFrameCount, S.metaOut.fullFrameCount);
+end
+end
+
+function path = default_lidar_extrinsics_file(matlabDir)
+%DEFAULT_LIDAR_EXTRINSICS_FILE Select the newest applicable calibration.
+path = '';
+resultsRoot = fullfile(matlabDir, '..', 'results');
+folders = dir(fullfile(resultsRoot, 'lidar_radar_calibration_*'));
+folders = folders([folders.isdir]);
+[~, order] = sort([folders.datenum], 'descend');
+folders = folders(order);
+for index = 1:numel(folders)
+    candidate = fullfile(folders(index).folder, folders(index).name, ...
+        'lidar_radar_extrinsics_candidate.json');
+    if ~isfile(candidate), continue; end
+    try
+        value = jsondecode(fileread(candidate));
+        if isfield(value, 'applicable') && logical(value.applicable)
+            path = candidate;
+            return;
+        end
+    catch
+    end
+end
+end
+
+function info = configure_lidar_extrinsics(info, path)
+%CONFIGURE_LIDAR_EXTRINSICS Enable fusion only for an applicable candidate.
+if isempty(path) || ~info.available
+    return;
+end
+path = char(path);
+if ~isfile(path)
+    warning('view_take:ExtrinsicsUnavailable', 'LiDAR 外参文件不存在，融合画面降级：%s', path);
+    return;
+end
+try
+    extrinsics = load_lidar_radar_extrinsics(path);
+    if ~isfield(extrinsics, 'applicable') || ~logical(extrinsics.applicable)
+        warning('view_take:ExtrinsicsNotApplicable', ...
+            'LiDAR 外参不可用（applicable=false），融合画面降级：%s', path);
+        return;
+    end
+    info.extrinsics = extrinsics;
+    info.extrinsicsAvailable = true;
+catch ex
+    warning('view_take:ExtrinsicsInvalid', 'LiDAR 外参无效，融合画面降级：%s', ex.message);
+end
+end
+
+function pointsRadar = transform_lidar_points(points, extrinsics)
+pointsRadar = (double(extrinsics.lidarToRadarR) * double(points(:,1:3)).').';
+pointsRadar = pointsRadar + reshape(double(extrinsics.lidarOriginInRadarM), 1, 3);
+end
+
+% ================================================================
+function lim = lidar_limits(files)
+%抽样若干批次得到稳定显示范围，避免播放时坐标轴闪动。
+lim = {[-3 3], [0 9], [-1.4 1.6]};
+try
+    idx = unique(round(linspace(1, numel(files), min(6, numel(files)))));
+    points = zeros(0, 3);
+    for fileIndex = idx
+        batch = read_livox_bin(files{fileIndex});
+        cloud = double(batch.points);
+        step = max(1, floor(size(cloud, 1) / 3000));
+        points = [points; cloud(1:step:end, :)]; %#ok<AGROW>
+    end
+    if size(points, 1) < 20, return; end
+    x = pctile(points(:, 1), [1 99]);
+    y = pctile(points(:, 2), [1 99]);
+    z = pctile(points(:, 3), [1 99]);
+    lim = {[x(1)-0.2 x(2)+0.2], [y(1)-0.2 y(2)+0.2], [z(1)-0.2 z(2)+0.2]};
+catch
+end
 end
 
 % ================================================================

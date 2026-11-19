@@ -96,6 +96,8 @@ namespace Acquire
         private bool _running;
         private readonly RadarSummary _summary = new RadarSummary();
         private readonly RadarPreviewProcessor _previewProcessor;
+        private readonly RadarPointCloudProcessor _pointCloudProcessor;
+        private readonly Action<RadarFrameStat> _frameClosed;
         private bool _previewDisposed;
 
         public RadarSink(TakeWriter take, Timebase tb, int packetsPerFrame, int payloadBytes, Action<string> log)
@@ -105,6 +107,13 @@ namespace Acquire
 
         public RadarSink(TakeWriter take, Timebase tb, int packetsPerFrame, int payloadBytes, Action<string> log,
                          LatestPreview<RadarPreviewFrame> preview)
+            : this(take, tb, packetsPerFrame, payloadBytes, log, preview, null)
+        {
+        }
+
+        public RadarSink(TakeWriter take, Timebase tb, int packetsPerFrame, int payloadBytes, Action<string> log,
+                         LatestPreview<RadarPreviewFrame> preview, LatestPreview<RadarCloudFrame> pointCloudPreview,
+                         Action<RadarFrameStat> frameClosed = null)
         {
             if (packetsPerFrame <= 0) throw new ArgumentOutOfRangeException("packetsPerFrame");
             if (payloadBytes <= 0) throw new ArgumentOutOfRangeException("payloadBytes");
@@ -113,8 +122,10 @@ namespace Acquire
             _log = log ?? delegate { };
             _packetsPerFrame = packetsPerFrame;
             _payloadBytes = payloadBytes;
+            _frameClosed = frameClosed;
             _record = new byte[12 + payloadBytes];
             if (preview != null) _previewProcessor = new RadarPreviewProcessor(preview);
+            if (pointCloudPreview != null) _pointCloudProcessor = new RadarPointCloudProcessor(pointCloudPreview);
         }
 
         public bool IsRunning { get { lock (_gate) return _running; } }
@@ -260,7 +271,11 @@ namespace Acquire
                 for (int k = 0; k < chirps; k++)
                 {
                     if (_previewProcessor != null)
-                        _previewProcessor.AddChirp(frameIndex, packet.Payload, k * _payloadBytes, _payloadBytes, stamp.RelMs);
+                        _previewProcessor.AddChirp(frameIndex, (int)((logicalBase + k) % _packetsPerFrame),
+                            packet.Payload, k * _payloadBytes, _payloadBytes, stamp.RelMs);
+                    if (_pointCloudProcessor != null)
+                        _pointCloudProcessor.AddChirp(frameIndex, (int)((logicalBase + k) % _packetsPerFrame),
+                            packet.Payload, k * _payloadBytes, _payloadBytes, stamp.RelMs);
                     Buffer.BlockCopy(BitConverter.GetBytes(ticks), 0, _record, 0, 8);
                     Buffer.BlockCopy(BitConverter.GetBytes((uint)(logicalBase + k)), 0, _record, 8, 4);
                     Buffer.BlockCopy(packet.Payload, k * _payloadBytes, _record, 12, _payloadBytes);
@@ -280,6 +295,7 @@ namespace Acquire
             {
                 stat.Missing = Math.Max(0, stat.Expected - stat.Received);
                 _missing += stat.Missing;
+                if (_frameClosed != null) _frameClosed(stat);
             }
         }
 
@@ -290,6 +306,7 @@ namespace Acquire
             if (_previewProcessor != null && !_previewDisposed)
             {
                 _previewProcessor.Dispose();
+                if (_pointCloudProcessor != null) _pointCloudProcessor.Dispose();
                 _previewDisposed = true;
             }
 
@@ -343,6 +360,7 @@ namespace Acquire
             foreach (RadarFrameStat s in stats)
             {
                 _take.AddRadarFrame(s);
+                if (_frameClosed != null) _frameClosed(s);
                 // 雷达一帧只对应一个 .mat 文件，时间取该帧首包到达时刻
                 if (s.Received > 0) _take.AddRow("radar", s.FrameNumber, s.FirstRelMs, "radar_adc.mat");
             }
@@ -399,6 +417,7 @@ namespace Acquire
         {
             try { Stop(); } catch { }
             if (_previewProcessor != null && !_previewDisposed) _previewProcessor.Dispose();
+            if (_pointCloudProcessor != null && !_previewDisposed) _pointCloudProcessor.Dispose();
         }
     }
 }

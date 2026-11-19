@@ -11,6 +11,8 @@ namespace Acquire
 {
     internal static class Program
     {
+        private static Mutex _guiMutex;
+
         [DllImport("winmm.dll")]
         private static extern uint timeBeginPeriod(uint milliseconds);
 
@@ -43,6 +45,13 @@ namespace Acquire
             {
                 ConsoleIo.Ensure();
                 return ExportCloud(args, exportTake);
+            }
+
+            string exportLidarTake = ValueOf(args, "--export-lidar");
+            if (exportLidarTake != null)
+            {
+                ConsoleIo.Ensure();
+                return ExportLidar(args, exportLidarTake);
             }
 
             if (HasArg(args, "--dump-factory-calibration"))
@@ -90,8 +99,18 @@ namespace Acquire
                 try { return ProbeUvc(args); } catch (Exception ex) { ConsoleIo.WriteLine("UVC 探针异常：" + ex.GetType().Name + " : " + ex.Message); ConsoleIo.WriteLine(ex.StackTrace); return 3; }
             }
 
+            bool firstGuiInstance;
+            _guiMutex = new Mutex(true, "Local\\Leida.Acquire.Multimodal.Gui", out firstGuiInstance);
+            if (!firstGuiInstance)
+            {
+                MessageBox.Show("采集程序已经在运行。请使用已打开的窗口，或先在任务管理器结束旧的 Acquire.exe。",
+                    "程序已运行", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return 2;
+            }
+
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
+            CleanupUvcDiagnostics();
             string demoScreenshot = ValueOf(args, "--demo-screenshot");
             bool demoMode = HasArg(args, "--demo") || !string.IsNullOrEmpty(demoScreenshot);
             MainForm form = new MainForm(demoMode);
@@ -106,6 +125,18 @@ namespace Acquire
                 };
                 form.Shown += delegate { screenshotTimer.Start(); };
             }
+            string idlePreviewScreenshot = ValueOf(args, "--idle-preview-screenshot");
+            if (!string.IsNullOrEmpty(idlePreviewScreenshot))
+            {
+                System.Windows.Forms.Timer idlePreviewTimer = new System.Windows.Forms.Timer { Interval = 6000 };
+                idlePreviewTimer.Tick += delegate
+                {
+                    idlePreviewTimer.Stop();
+                    form.SaveScreenshot(Path.GetFullPath(idlePreviewScreenshot));
+                    form.Close();
+                };
+                form.Shown += delegate { idlePreviewTimer.Start(); };
+            }
             if (HasArg(args, "--ui-smoke-test"))
             {
                 System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer { Interval = 1500 };
@@ -117,7 +148,22 @@ namespace Acquire
                 form.Shown += delegate { timer.Start(); };
             }
             Application.Run(form);
+            CleanupUvcDiagnostics();
             return 0;
+        }
+
+        private static void CleanupUvcDiagnostics()
+        {
+            string directory = AppDomain.CurrentDomain.BaseDirectory;
+            foreach (string name in new[] { "ds_active.txt", "ds_formats.txt" })
+            {
+                try
+                {
+                    string path = Path.Combine(directory, name);
+                    if (File.Exists(path)) File.Delete(path);
+                }
+                catch { }
+            }
         }
 
         /// <summary>
@@ -352,12 +398,36 @@ private static int IntArg(string[] args, string name, int fallback)
             ConsoleIo.WriteLine("  --verify-take <take目录>      校验已有 take");
             ConsoleIo.WriteLine("  --export-cloud <take目录> [--stride 4] [--frame 120] [--radar-frame] [--csv] [--out 目录]");
             ConsoleIo.WriteLine("                                用 depth\\*.png + meta.json 内参生成点云");
-            ConsoleIo.WriteLine("  --capture [--camera 1|null] [--delay 1] [--duration 3] [--label 文本] [--out 目录] [--no-radar] [--cues]");
+            ConsoleIo.WriteLine("  --export-lidar <take目录> [--out 目录] [--merged]");
+            ConsoleIo.WriteLine("                                从 MID-70 原始 LIVOXBIN 生成 PLY 点云；--merged 另存合并点云");
+            ConsoleIo.WriteLine("  --capture [--camera 1|null] [--no-camera] [--delay 1] [--duration 3] [--label 文本] [--out 目录] [--no-radar] [--cues]");
             ConsoleIo.WriteLine("                                不开界面采一次（验证真机内参档位用）；--cues 开提示音");
             ConsoleIo.WriteLine("  --ui-smoke-test               起界面 1.5 s 后自动关闭（构建自测用）");
             ConsoleIo.WriteLine("  --demo                        启动四路合成数据演示");
             ConsoleIo.WriteLine("  --demo-screenshot <png>       运行四路合成采集并保存界面截图");
+            ConsoleIo.WriteLine("  --idle-preview-screenshot <png>  不开始采集，等待真相机预览后保存界面截图");
             ConsoleIo.WriteLine("  --preview-stress-test [--seconds 1800]  四路最新帧缓冲压力测试");
+        }
+
+        private static int ExportLidar(string[] args, string takeDirectory)
+        {
+            try
+            {
+                takeDirectory = Path.GetFullPath(takeDirectory);
+                string output = ValueOf(args, "--out");
+                if (!string.IsNullOrEmpty(output) && !output.StartsWith("--", StringComparison.Ordinal))
+                    output = Path.GetFullPath(output);
+                else output = null;
+                int count = LidarCloudExporter.ExportTake(takeDirectory, output, HasArg(args, "--merged"));
+                string actualOutput = output ?? Path.Combine(takeDirectory, "lidar_cloud");
+                ConsoleIo.WriteLine("LiDAR 点云导出完成：" + count + " 批 → " + actualOutput);
+                return 0;
+            }
+            catch (Exception ex)
+            {
+                ConsoleIo.WriteLine("LiDAR 点云导出失败：" + ex.Message);
+                return 2;
+            }
         }
 
         /// <summary>
@@ -508,7 +578,9 @@ private static int IntArg(string[] args, string name, int fallback)
             ConsoleIo.WriteLine("Acquire 命令行采集 " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));
             ConsoleIo.WriteLine(new string('=', 62));
 
-            List<CameraOption> options = CameraProbe.Probe(delegate(string line) { ConsoleIo.WriteLine("  " + line); });
+            bool noCamera = HasArg(args, "--no-camera");
+            List<CameraOption> options = noCamera ? new List<CameraOption>() :
+                CameraProbe.Probe(delegate(string line) { ConsoleIo.WriteLine("  " + line); });
             List<CameraOption> real = new List<CameraOption>();
             CameraOption synthetic = null;
             foreach (CameraOption option in options)
@@ -530,7 +602,11 @@ private static int IntArg(string[] args, string name, int fallback)
             string cameraArg = ValueOf(args, "--camera");
             bool cameraArgIsFlag = !string.IsNullOrEmpty(cameraArg) && cameraArg.StartsWith("--", StringComparison.Ordinal);
             CameraOption camera = null;
-            if (string.IsNullOrEmpty(cameraArg) || cameraArgIsFlag)
+            if (noCamera)
+            {
+                ConsoleIo.WriteLine("已指定 --no-camera：本次跳过相机，继续采集其它传感器");
+            }
+            else if (string.IsNullOrEmpty(cameraArg) || cameraArgIsFlag)
             {
                 camera = real.Count > 0 ? real[0] : synthetic;
                 if (camera != null) ConsoleIo.WriteLine("未指定 --camera，使用：" + camera.Model);
@@ -551,7 +627,7 @@ private static int IntArg(string[] args, string name, int fallback)
                 }
                 camera = real[index - 1];
             }
-            if (camera == null)
+            if (camera == null && !noCamera)
             {
                 ConsoleIo.WriteLine("没有可用相机，无法采集");
                 return 1;
@@ -593,10 +669,10 @@ private static int IntArg(string[] args, string name, int fallback)
             if (!string.IsNullOrEmpty(baudText) && int.TryParse(baudText, out baud) && baud > 0)
                 session.SerialBaud = baud;
             session.Camera = camera;
-            session.SelfTest = camera.Kind == CameraKind.Null;
+            session.SelfTest = camera != null && camera.Kind == CameraKind.Null;
 
             ConsoleIo.WriteLine("");
-            ConsoleIo.WriteLine("开始采集：相机=" + camera.Display + "，延迟 " + delay + " s，时长 " + duration + " s，雷达=" +
+            ConsoleIo.WriteLine("开始采集：相机=" + (camera == null ? "未启用" : camera.Display) + "，延迟 " + delay + " s，时长 " + duration + " s，雷达=" +
                                 (session.RadarEnabled ? "启用" : "关闭") + "，点云=" + (session.SaveCloud ? "存" : "不存"));
 
             string takeDirectory;

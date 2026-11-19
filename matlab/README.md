@@ -92,6 +92,7 @@ run_compute_interactive
 cd <3.2>\matlab
 compute_all                                        % 默认目录
 compute_all([], struct('root','...\takes\11-4'))   % 指定采集根目录
+compute_all([], struct('autoCalibrate', true))     % 计算后自动做 LiDAR→雷达标定
 view_take
 ```
 
@@ -102,7 +103,10 @@ view_take
 - 平移：默认相机光心在雷达原点上方 `0.10 m`，来自装机尺寸，属于安装估计，不是精密外参标定。
 - 旧的“每帧用 2% 高度分位数拉到地面”会随场景漂移，默认已关闭；仅可用 `useFloorAlignment=true` 复现旧结果。
 - 外参唯一来源是 `radar_camera_extrinsics.json`。其中 `cameraToRadarR` 把相机点旋转到雷达轴；当前 `cameraOriginInRadarM=[-0.0093,-0.0063,0.1000] m`。X/Y 来自五组同步表面拟合，另一整组随机留出验证；Z=10 cm 仍来自安装测量，因为当前正前方数据不能独立约束垂直平移。
-- `view_take` 的中间画面会把雷达点以红圈叠加到深度点云中；两者已经处于同一个雷达坐标系，可以直接检查重合。
+- `view_take` 的深度点云已经通过相机→雷达外参转换到 ADT7880 坐标；take 同时包含 `lidar_frames.csv` 和 `lidar/*.bin` 时，前三格显示毫米波、深度和 MID-70，第四格直接以 3D 方式叠加三路统一坐标点云，便于检查是否重合。
+- MID-70 默认累计当前毫米波帧之前 1000 ms，可用 `'lidarWindowMs', 500` 等参数调整；第四格不读取 RGB 图片，也不需要连接相机或导出工厂标定。
+- `compute_take` 的抽样模式（`maxFrames`）必须指定 `outputFile`，防止诊断工具覆盖正式 `results/takes/*_res.mat`；正式结果会记录 `resultMode/fullFrameCount/processedFrameCount`。
+- `view_take` 默认扫描 `results/lidar_radar_calibration_*` 并使用最新的 `applicable=true` 外参；也可以显式传入 `lidarExtrinsicsFile`。未找到有效外参时仍可分别查看三类点云，融合画面会显示未启用提示，不会伪造空间叠加。
 - 修改外参文件后重新运行 `compute_all([], struct('force',true))`。每个结果的 `metaOut` 会保存实际使用的旋转矩阵、平移和外参状态。
 
 ## 六、工具
@@ -131,5 +135,41 @@ compute_take(takeDir, struct('extrinsicsFile', candidate));
 候选中的 `radarRangeBiasM` 会作为独立雷达测距补偿应用，不会混入相机到雷达的平移向量。
 | `tools\board_diff.m` | 同上，早期版本 |
 | `tools\verify_range.m` | 用 res 点云核对板子距离 |
+
+### MID-70 与毫米波采集验收
+
+MID-70 保存的是设备原生笛卡尔 XYZ，不使用深度相机的针孔反投影。采完后运行：
+
+```matlab
+addpath('lidar')
+report = inspect_lidar_radar_take(takeDir);
+```
+
+它会检查 LiDAR 原始批次、反射率、坐标范围、毫米波丢包和两路时间配对，并绘制激光点云与时间差。需要生成毫米波检测点并与激光点云并排查看时，使用：
+
+```matlab
+report = inspect_lidar_radar_take(takeDir, struct('processRadar', true));
+```
+
+在 `lidar -> radar` 外参正式标定前，两路点云不会强行叠加。
+
+LiDAR 或相机安装位置变化后，在采集程序点击“安装位置…”保存相对毫米波的 `[右, 前, 上]` 初值；MATLAB 的 `lidar_radar_calibration_config` 会自动读取 `capture/app/calibration_installation.json`。也可以直接编辑配置模板，然后运行：
+
+```matlab
+addpath('lidar')
+config = lidar_radar_calibration_config();
+report = run_lidar_radar_auto_calibration(config);
+```
+
+也可以让批处理在计算完所有 take 后自动标定并生成候选外参：
+
+```matlab
+compute_all([], struct('autoCalibrate', true));
+view_take;
+```
+
+自动标定要求所选 take 是包含棋盘、深度、LiDAR 和雷达数据的静态采集组。标定失败不会覆盖已有外参；`view_take` 会回退到最近一次有效结果。
+
+程序自动提取棋盘中心、补偿倾斜板面、拟合外参并生成候选 JSON 和标定前后实景图，不覆盖正式外参。
 | `tools\measure_gate.m` | CFAR 门限对比（1.60 / 1.53） |
 | `tools\compare_dump.m` | 两版算法逐帧对比 |

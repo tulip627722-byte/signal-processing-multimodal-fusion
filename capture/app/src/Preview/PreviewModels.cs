@@ -62,7 +62,32 @@ namespace Acquire
         public double[] MagnitudeDb;
         public double PeakRangeMeters;
         public double PeakMagnitudeDb;
+        public double LeakCutoffMeters;
+        public int AveragedChirps;
         public int FrameNumber;
         public double RelMs;
+    }
+
+    internal struct RadarCloudPoint
+    {
+        public float X;
+        public float Y;
+        public float Z;
+        public float MagnitudeDb;
+        public float RangeMeters;
+        public float VelocityMetersPerSecond;
+        public uint Cluster;
+    }
+
+    internal sealed class RadarCloudFrame
+    {
+        public RadarCloudPoint[] Points;
+        public int Count;
+        public uint Sequence;
+        public uint Status;
+        public uint BoardTimestampMicroseconds;
+        public uint ClusterCount;
+        public int Version;
+        public double ReceivedAtMs;
     }
 }

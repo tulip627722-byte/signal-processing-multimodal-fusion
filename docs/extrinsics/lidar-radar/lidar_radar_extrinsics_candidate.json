@@ -1,0 +1,90 @@
+{
+  "version": 1,
+  "sourceFrame": "livox_sensor",
+  "targetFrame": "adt7880_radar",
+  "units": "m",
+  "lidarAxes": "X forward, Y left, Z up",
+  "radarAxes": "X right, Y forward, Z up",
+  "lidarToRadarR": [
+    [
+      0,
+      -1,
+      0
+    ],
+    [
+      1,
+      0,
+      0
+    ],
+    [
+      0,
+      0,
+      1
+    ]
+  ],
+  "lidarOriginInRadarM": [
+    -0.086976821112811187,
+    -0.11221186871888289,
+    -0.015897605191823511
+  ],
+  "initialLidarToRadarR": [
+    [
+      0,
+      -1,
+      0
+    ],
+    [
+      1,
+      0,
+      0
+    ],
+    [
+      0,
+      0,
+      1
+    ]
+  ],
+  "initialLidarOriginInRadarM": [
+    0,
+    0,
+    -0.15
+  ],
+  "solveMode": "translation_only",
+  "rotationCorrectionFromMeasuredDeg": 0,
+  "status": "PASS",
+  "applicable": true,
+  "fitSamples": 5,
+  "fitMedianErrorM": 0.041703019015626168,
+  "fitP95ErrorM": 0.1345080472713108,
+  "fitMaxErrorM": 0.14442435403092638,
+  "leaveOneOutMedianErrorM": 0.049298183478597567,
+  "leaveOneOutP95ErrorM": 0.15292347074576321,
+  "thinSliceFitMedianErrorM": 0.090325664772753014,
+  "thinSliceLeaveOneOutMedianErrorM": 0.10874958370900514,
+  "tiltCompensationImproved": true,
+  "cameraExtrinsicsFile": "matlab/radar_camera_extrinsics.json",
+  "cameraToRadarR": [
+    [
+      1,
+      0,
+      0
+    ],
+    [
+      0,
+      0,
+      1
+    ],
+    [
+      0,
+      -1,
+      0
+    ]
+  ],
+  "cameraOriginInRadarM": [
+    -0.0093,
+    -0.0063,
+    0.1
+  ],
+  "source": "five static checkerboard takes from 11-18",
+  "note": "Depth checkerboard centers were transformed by the configured camera-to-radar extrinsics. MID-70 centers use camera-guided 1000 ms plane extraction. Rotation is fixed from the known parallel mounting axes; checkerboard centers robustly fit translation. Validate visually before promotion."
+}

@@ -8,7 +8,10 @@ result=struct('exists',isfile(candidate),'applicable',logical(E.applicable), ...
  'rejected',false,'message','');
 try
  take=fullfile(fileparts(root32),'11-4','20261104_162154_室内4米');
- compute_take(take,struct('extrinsicsFile',candidate,'maxFrames',1));
+temporaryResult = [tempname '.mat'];
+cleanup = onCleanup(@() delete_if_exists(temporaryResult)); %#ok<NASGU>
+compute_take(take,struct('extrinsicsFile',candidate,'maxFrames',1, ...
+    'outputFile',temporaryResult));
 catch ex
  result.rejected=contains(ex.message,'未通过质检');result.message=ex.message;
 end
@@ -18,4 +21,8 @@ end
 
 function s=pass_text(v)
 if v,s='PASS';else,s='FAIL';end
+end
+
+function delete_if_exists(path)
+if isfile(path), delete(path); end
 end

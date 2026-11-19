@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Threading;
 
 namespace Acquire
@@ -7,12 +8,20 @@ namespace Acquire
     {
         private const int Samples = 1024;
         private const int Bins = Samples / 2;
-        private const double SpeedOfLight = 299792458.0;
+        private const double SpeedOfLight = 3.0e8;
+        private const double SampleRateHz = 16.667e6;
         private const double BandwidthHz = 4.0e9;
+        private const double RampSeconds = 60.0e-6;
+        private const int ChirpsPerFrame = 2048;
+        private const int EightTransmitStart = 1024;
+        private const int TransmitChannels = 8;
+        private const int ChirpsPerTransmit = 16;
+        private const int FirstTargetBin = 14;
+        private const int PeakHalfWidth = 5;
         private readonly object _gate = new object();
         private readonly LatestPreview<RadarPreviewFrame> _output;
         private readonly Thread _worker;
-        private double[] _frameSamples;
+        private List<double[]> _frameChirps;
         private volatile int _frameIndex = -1;
         private double _firstRelMs;
         private Work _pending;
@@ -20,7 +29,7 @@ namespace Acquire
 
         private sealed class Work
         {
-            public double[] Samples;
+            public List<double[]> Chirps;
             public int FrameIndex;
             public double RelMs;
         }
@@ -32,32 +41,33 @@ namespace Acquire
             _worker.Start();
         }
 
-        public void AddChirp(int frameIndex, byte[] payload, int offset, int count, double relMs)
+        public void AddChirp(int frameIndex, int chirpInFrame, byte[] payload, int offset, int count, double relMs)
         {
             if (payload == null || count < Samples * 2) return;
-            if (frameIndex == _frameIndex) return;
+            if (chirpInFrame < EightTransmitStart || chirpInFrame >= ChirpsPerFrame) return;
+            int eightTransmitOffset = chirpInFrame - EightTransmitStart;
+            int chirpSequence = (eightTransmitOffset / TransmitChannels) % ChirpsPerTransmit;
+            if ((chirpSequence % 4) != 0) return;
             lock (_gate)
             {
-                if (frameIndex == _frameIndex) return;
                 if (_frameIndex >= 0 && frameIndex != _frameIndex)
                 {
-                    if (_frameSamples != null)
+                    if (_frameChirps != null && _frameChirps.Count > 0)
                     {
-                        _pending = new Work { Samples = _frameSamples, FrameIndex = _frameIndex, RelMs = _firstRelMs };
+                        _pending = new Work { Chirps = _frameChirps, FrameIndex = _frameIndex, RelMs = _firstRelMs };
                         Monitor.PulseAll(_gate);
                     }
-                    _frameSamples = null;
+                    _frameChirps = null;
                 }
                 if (frameIndex != _frameIndex) { _frameIndex = frameIndex; _firstRelMs = relMs; }
-                if (_frameSamples == null)
+                if (_frameChirps == null) _frameChirps = new List<double[]>(128);
+                double[] samples = new double[Samples];
+                for (int sample = 0; sample < Samples; sample++)
                 {
-                    _frameSamples = new double[Samples];
-                    for (int sample = 0; sample < Samples; sample++)
-                    {
-                        int index = offset + sample * 2;
-                        _frameSamples[sample] = (payload[index] | (payload[index + 1] << 8)) - 2048;
-                    }
+                    int index = offset + sample * 2;
+                    samples[sample] = (payload[index] | (payload[index + 1] << 8)) - 2048;
                 }
+                _frameChirps.Add(samples);
             }
         }
 
@@ -82,28 +92,63 @@ namespace Acquire
 
         private void Publish(Work work)
         {
-            double[] real = work.Samples;
-            double[] imaginary = new double[Samples];
-            for (int sample = 0; sample < Samples; sample++)
-                real[sample] *= 0.54 - 0.46 * Math.Cos(2 * Math.PI * sample / (Samples - 1));
-            Fft(real, imaginary);
+            double[] amplitudeSum = new double[Bins];
+            foreach (double[] chirp in work.Chirps)
+            {
+                double[] real = chirp;
+                double[] imaginary = new double[Samples];
+                for (int sample = 0; sample < Samples; sample++)
+                    real[sample] *= 0.54 - 0.46 * Math.Cos(2 * Math.PI * sample / (Samples - 1));
+                Fft(real, imaginary);
+                for (int i = 0; i < Bins; i++)
+                    amplitudeSum[i] += Math.Sqrt(real[i] * real[i] + imaginary[i] * imaginary[i]);
+            }
             double[] range = new double[Bins];
             double[] magnitude = new double[Bins];
-            int peak = 1;
-            double peakDb = double.MinValue;
-            double resolution = SpeedOfLight / (2.0 * BandwidthHz);
+            double resolution = DistancePerBin;
             for (int i = 0; i < Bins; i++)
             {
                 range[i] = i * resolution;
-                double amplitude = Math.Sqrt(real[i] * real[i] + imaginary[i] * imaginary[i]);
+                double amplitude = amplitudeSum[i] / Math.Max(1, work.Chirps.Count);
                 magnitude[i] = 20.0 * Math.Log10(Math.Max(amplitude, 1e-9));
-                if (i > 0 && magnitude[i] > peakDb) { peakDb = magnitude[i]; peak = i; }
             }
+            int peak = FindTargetPeak(amplitudeSum);
             _output.Publish(new RadarPreviewFrame
             {
                 RangeMeters = range, MagnitudeDb = magnitude, PeakRangeMeters = range[peak], PeakMagnitudeDb = magnitude[peak],
+                LeakCutoffMeters = range[FirstTargetBin], AveragedChirps = work.Chirps.Count,
                 FrameNumber = work.FrameIndex + 1, RelMs = work.RelMs
             });
+        }
+
+        internal static double DistancePerBin
+        {
+            get { return SpeedOfLight * SampleRateHz / (2.0 * (BandwidthHz / RampSeconds) * Samples); }
+        }
+
+        internal static int FindTargetPeak(double[] amplitude)
+        {
+            if (amplitude == null || amplitude.Length <= FirstTargetBin) return 0;
+            int strongestLocal = -1;
+            double strongestValue = double.MinValue;
+            int last = amplitude.Length - PeakHalfWidth;
+            for (int i = Math.Max(FirstTargetBin, PeakHalfWidth); i < last; i++)
+            {
+                bool local = true;
+                for (int d = 1; d <= PeakHalfWidth && local; d++)
+                    local = amplitude[i] > amplitude[i - d] && amplitude[i] > amplitude[i + d];
+                if (local && amplitude[i] > strongestValue)
+                {
+                    strongestValue = amplitude[i];
+                    strongestLocal = i;
+                }
+            }
+            if (strongestLocal >= 0) return strongestLocal;
+
+            int strongest = FirstTargetBin;
+            for (int i = FirstTargetBin + 1; i < amplitude.Length; i++)
+                if (amplitude[i] > amplitude[strongest]) strongest = i;
+            return strongest;
         }
 
         internal static void Fft(double[] real, double[] imaginary)

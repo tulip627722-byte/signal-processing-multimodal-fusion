@@ -106,7 +106,13 @@ namespace Acquire
                 }
             }
 
-            v.Require(rows.Count > 0, "manifest.csv 非空（" + rows.Count + " 行）");
+            bool colorRequired = GetBool(GetObject(meta, "color"), "available", true);
+            bool depthRequired = GetBool(GetObject(meta, "depth"), "available", true);
+            bool radarRequired = GetBool(GetObject(meta, "radar"), "enabled", true);
+            bool lidarRequired = GetBool(GetObject(meta, "lidar"), "enabled", false);
+            bool anyStreamRequired = colorRequired || depthRequired || radarRequired || lidarRequired;
+            if (anyStreamRequired) v.Require(rows.Count > 0, "manifest.csv 非空（" + rows.Count + " 行）");
+            else v.Note("本次没有可用传感器，manifest.csv 允许只有表头");
             bool monotonic = true;
             double lastRel = double.NegativeInfinity;
             foreach (ManifestEntry row in rows)
@@ -122,10 +128,6 @@ namespace Acquire
                 if (!byStream.ContainsKey(row.Stream)) byStream[row.Stream] = new List<ManifestEntry>();
                 byStream[row.Stream].Add(row);
             }
-            bool colorRequired = GetBool(GetObject(meta, "color"), "available", true);
-            bool depthRequired = GetBool(GetObject(meta, "depth"), "available", true);
-            bool radarRequired = GetBool(GetObject(meta, "radar"), "enabled", true);
-            bool lidarRequired = GetBool(GetObject(meta, "lidar"), "enabled", false);
             foreach (string stream in new[] { "radar", "color", "depth", "lidar" })
             {
                 bool required = stream == "radar" ? radarRequired : (stream == "lidar" ? lidarRequired : (stream == "color" ? colorRequired : depthRequired));
@@ -172,7 +174,11 @@ namespace Acquire
 
             v.Require(GetString(meta, "format", "") == "ACQUIRE_TAKE_V1", "meta.format = ACQUIRE_TAKE_V1");
             v.Require(GetDouble(timebaseObj, "frequencyHz", 0) > 0, "meta.timebase.frequencyHz > 0");
-            v.Require(GetString(cameraObj, "model", "").Length > 0, "meta.camera.model 非空（" + GetString(cameraObj, "model", "") + "）");
+            bool cameraRequired = GetBool(cameraObj, "available", colorRequired || depthRequired);
+            if (cameraRequired)
+                v.Require(GetString(cameraObj, "model", "").Length > 0, "meta.camera.model 非空（" + GetString(cameraObj, "model", "") + "）");
+            else
+                v.Note("相机不可用，不要求 meta.camera.model 非空");
 
             string colorDir = Path.Combine(takeDir, "color");
             string depthDir = Path.Combine(takeDir, "depth");
@@ -345,9 +351,19 @@ namespace Acquire
             if (byStream.ContainsKey("color") && byStream["color"].Count > 1 && radarRows.Count > 1)
                 ReportCrossAlignment(v, byStream["color"], radarRows);
 
-            double maxRel = rows.Count == 0 ? 0 : rows[rows.Count - 1].RelMs;
-            v.Require(maxRel >= (expectedDurationSeconds - 0.6) * 1000.0 && maxRel <= (expectedDurationSeconds + 1.0) * 1000.0,
-                "manifest 最后时间戳 " + maxRel.ToString("0.0") + " ms 与设定时长吻合");
+            if (rows.Count > 0)
+            {
+                double maxRel = rows[rows.Count - 1].RelMs;
+                bool durationCovered = maxRel >= (expectedDurationSeconds - 0.6) * 1000.0 &&
+                    maxRel <= (expectedDurationSeconds + 1.0) * 1000.0;
+                if (selfTest || GetBool(meta, "validForCalibration", false))
+                    v.Require(durationCovered, "manifest 最后时间戳 " + maxRel.ToString("0.0") + " ms 与设定时长吻合");
+                else if (durationCovered)
+                    v.Pass("manifest 最后时间戳 " + maxRel.ToString("0.0") + " ms 与设定时长吻合");
+                else
+                    v.Note("部分采集的最后数据时间戳为 " + maxRel.ToString("0.0") + " ms；会话仍完整保存，但不用于三传感器标定");
+            }
+            else v.Note("没有数据流，不检查 manifest 最后时间戳");
 
             return v;
         }

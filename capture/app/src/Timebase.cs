@@ -13,6 +13,7 @@ namespace Acquire
     {
         private readonly Stopwatch _sw;
         private DateTime _anchorUtc;
+        private long _originTimestamp;
 
         private Timebase()
         {
@@ -30,6 +31,7 @@ namespace Acquire
         {
             if (_sw.IsRunning) return;
             _anchorUtc = DateTime.UtcNow;
+            _originTimestamp = Stopwatch.GetTimestamp();
             _sw.Start();
         }
 
@@ -43,6 +45,11 @@ namespace Acquire
         public long Frequency { get { return Stopwatch.Frequency; } }
 
         public long ElapsedTicks { get { return _sw.ElapsedTicks; } }
+
+        public double RelMsFromTimestamp(long timestamp)
+        {
+            return (timestamp - _originTimestamp) * (1000.0 / Stopwatch.Frequency);
+        }
 
         /// <summary>相对记录起点的毫秒数（QPC 精度，约 100 ns 的整数倍）。</summary>
         public double ElapsedMs

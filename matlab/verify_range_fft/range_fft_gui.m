@@ -19,6 +19,12 @@ if nargin < 1 || isempty(root)
     root = 'D:\7880\Realtime\capture\takes\11-4';
 end
 
+% 强制优先使用本目录中的配套函数，避免 MATLAB 路径里旧版
+% plot_range_power / range_params 同名文件造成参数接口不一致。
+here = fileparts(mfilename('fullpath'));
+addpath(here, '-begin');
+addpath(fullfile(here, '..', 'algorithm', 'lib'), '-begin');
+
 st = struct();
 st.root = root;
 st.nFrames = 4;

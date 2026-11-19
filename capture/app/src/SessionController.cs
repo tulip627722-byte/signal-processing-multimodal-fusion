@@ -22,6 +22,7 @@ namespace Acquire
         public int DurationSeconds = 10;
         public bool RadarEnabled = true;
         public bool RadarSynthetic;
+        public bool RadarAc880Mode;
         public string LocalIp = "192.168.220.10";
         public int LocalPort = 8080;
         public string BoardIp = "192.168.220.100";
@@ -41,10 +42,12 @@ namespace Acquire
         public bool SoundCues;
         public bool VerboseLog = true;
         public bool LidarEnabled;
+        public bool FrameAlignmentEnabled;
         public bool LidarSynthetic = true;
         public string LidarBroadcastCode = "";
         public string LidarReplayDirectory = "";
         public string LidarReturnMode = "single";
+        public CalibrationInstallationConfig CalibrationInstallation;
     }
 
     internal sealed class SessionSnapshot
@@ -112,6 +115,8 @@ namespace Acquire
         private CameraOption _cameraOption;
         private DepthIntrinsics _intrinsics;
         private string _cameraError = "";
+        private string _radarError = "";
+        private string _lidarError = "";
         private string _cameraModeNote = "";
         private RadarSummary _radarSummary;
         private SyntheticRadar _syntheticRadar;
@@ -121,8 +126,16 @@ namespace Acquire
         private double _actualSeconds;
         private LidarCapture _lidar;
         private LidarCaptureStats _lidarStats;
+        private AlignmentCoordinator _alignment;
+        private double _alignmentRadarStartMs = double.NaN;
+        private string _lidarSerial = "";
+        private string _lidarFirmware = "";
+        private bool _cameraRuntimeWarning;
+        private bool _radarRuntimeWarning;
+        private bool _lidarRuntimeWarning;
         private readonly LatestPreview<CameraPreviewFrame> _cameraPreview = new LatestPreview<CameraPreviewFrame>();
         private readonly LatestPreview<RadarPreviewFrame> _radarPreview = new LatestPreview<RadarPreviewFrame>();
+        private readonly LatestPreview<RadarCloudFrame> _radarPointCloudPreview = new LatestPreview<RadarCloudFrame>();
         private readonly LatestPreview<LidarBatch> _lidarPreview = new LatestPreview<LidarBatch>();
 
         public event Action<string> Log;
@@ -138,14 +151,10 @@ namespace Acquire
         {
             if (options == null) throw new ArgumentNullException("options");
             if (IsBusy) throw new InvalidOperationException("采集正在进行中");
-            if (options.Camera == null) throw new ArgumentNullException("options.Camera");
             if (options.DurationSeconds < 1 || options.DurationSeconds > 600)
                 throw new ArgumentOutOfRangeException("options.DurationSeconds", "采集时长应在 1~600 秒");
             if (options.DelaySeconds < 0 || options.DelaySeconds > 60)
                 throw new ArgumentOutOfRangeException("options.DelaySeconds", "延迟应在 0~60 秒");
-
-            if (options.RadarEnabled && !options.RadarSynthetic)
-                options.LocalIp = RadarNetwork.ValidateLocalAddress(options.LocalIp);
 
             Directory.CreateDirectory(options.OutputRoot);
             _options = options;
@@ -153,12 +162,21 @@ namespace Acquire
             _stopRequested = false;
             _error = "";
             _cameraError = "";
+            _radarError = "";
+            _lidarError = "";
             _cameraModeNote = "";
+            _cameraRuntimeWarning = false;
+            _radarRuntimeWarning = false;
+            _lidarRuntimeWarning = false;
             _intrinsics = null;
             _takeDirectory = "";
             _radarSummary = null;
             _cameraStats = null;
             _lidarStats = null;
+            _alignment = options.FrameAlignmentEnabled ? new AlignmentCoordinator(1000.0, 30.0) : null;
+            _alignmentRadarStartMs = double.NaN;
+            _lidarSerial = "";
+            _lidarFirmware = "";
             _serialCandidates = new List<PortCandidate>();
             _serialCandidateIndex = 0;
             _serialSendsOnCandidate = 0;
@@ -171,7 +189,8 @@ namespace Acquire
             _state = SessionState.Countdown;
             _countdown = options.DelaySeconds;
             _message = options.DelaySeconds > 0 ? "倒计时" : "启动中";
-            EmitLog("开始任务：延迟 " + options.DelaySeconds + " s，时长 " + options.DurationSeconds + " s，相机=" + options.Camera.Display);
+            EmitLog("开始任务：延迟 " + options.DelaySeconds + " s，时长 " + options.DurationSeconds + " s，相机=" +
+                    (options.Camera == null ? "未启用" : options.Camera.Display));
 
             _worker = new Thread(Run);
             _worker.Name = "Acquire session";
@@ -202,38 +221,35 @@ namespace Acquire
                 // 先开相机，再做倒计时：倒计时期间一直在抽帧丢弃，
                 // 这样雷达一开始录，彩色和深度都已经是热的（不会缺开头几帧）。
                 // 相机预热放在时钟启动之前：设备打开耗时不应该计入采集时长
-                source = CameraProbe.Create(_cameraOption, EmitLog, delegate { return _tb == null ? 0 : _tb.ElapsedMs; });
-                try
+                if (_cameraOption != null)
                 {
-                    source.Open();
-                    ValidateCameraFrames(source, _cameraOption);
-                    _cameraModeNote = DescribeModes(source);
-                    EmitLog("相机首帧验收通过：" + source.Model + " / " + source.Serial +
-                            (source.HasDepth ? "（含深度）" : "（深度不可用）"));
+                    try
+                    {
+                        source = CameraProbe.Create(_cameraOption, EmitLog, delegate { return _tb == null ? 0 : _tb.ElapsedMs; });
+                        source.Open();
+                        ValidateCameraFrames(source, _cameraOption);
+                        _cameraModeNote = DescribeModes(source);
+                        EmitLog("相机首帧验收通过：" + source.Model + " / " + source.Serial +
+                                (source.HasDepth ? "（含深度）" : "（深度不可用）"));
 
-                    IDepthIntrinsicsProvider provider = source as IDepthIntrinsicsProvider;
-                    if (provider != null) _intrinsics = provider.GetDepthIntrinsics();
-                    if (_intrinsics != null && _intrinsics.Valid)
-                    {
-                        EmitLog("深度内参：" + _intrinsics.Describe() + "（" + _intrinsics.Detail + "）");
+                        IDepthIntrinsicsProvider provider = source as IDepthIntrinsicsProvider;
+                        if (provider != null) _intrinsics = provider.GetDepthIntrinsics();
+                        if (_intrinsics != null && _intrinsics.Valid)
+                            EmitLog("深度内参：" + _intrinsics.Describe() + "（" + _intrinsics.Detail + "）");
+                        else if (source.HasDepth)
+                            EmitLog("警告：该后端没有提供深度内参，只能采集后用标称 FOV 重算");
                     }
-                    else if (source.HasDepth)
+                    catch (Exception ex)
                     {
-                        EmitLog("警告：该后端没有提供深度内参，只能采集后用标称 FOV 重算");
+                        _cameraError = DynHelper.DescribeException(ex);
+                        if (_cameraError.IndexOf("Failed to set USB interface", StringComparison.OrdinalIgnoreCase) >= 0)
+                            _cameraError += "\r\n建议：关闭相机软件，重新插拔 Astra 并使用 USB 3.x 接口。";
+                        EmitLog("警告：相机启动失败，本次跳过相机并继续采集：" + _cameraError);
+                        try { if (source != null) source.Dispose(); } catch { }
+                        source = null;
                     }
                 }
-                catch (Exception ex)
-                {
-                    _cameraError = DynHelper.DescribeException(ex);
-                    if (_cameraError.IndexOf("Failed to set USB interface", StringComparison.OrdinalIgnoreCase) >= 0)
-                    {
-                        _cameraError += "\r\n建议：关闭相机软件，重新插拔 Astra 并使用 USB 3.x 接口。";
-                    }
-                    EmitLog("相机启动失败：" + _cameraError);
-                    try { source.Dispose(); } catch { }
-                    source = null;
-                    throw new InvalidOperationException("相机没有采到有效帧，已阻止本次采集。" + _cameraError);
-                }
+                else EmitLog("警告：未启用可用相机，本次继续采集其它传感器");
 
                 // 倒计时：这段时间相机已经在跑，持续抽帧丢弃，把彩色和深度都预热好。
                 if (o.DelaySeconds > 0)
@@ -266,29 +282,58 @@ namespace Acquire
                 _takeDirectory = _take.Directory;
                 EmitLog("take 目录：" + _take.Directory);
 
-                if (o.RadarEnabled)
+                if (o.RadarEnabled && !o.FrameAlignmentEnabled)
                 {
-                    if (!o.RadarSynthetic) EmitLog("雷达网络检查：" + RadarNetwork.Describe(o.LocalIp));
-                    _radar = new RadarSink(_take, _tb, o.PacketsPerFrame, o.PayloadBytes, EmitLog, _radarPreview);
-                    _radar.Start(o.LocalIp, o.LocalPort, o.BoardIp);
-                    if (o.RadarSynthetic)
+                    try
                     {
-                        _syntheticRadar = new SyntheticRadar(o.LocalIp, o.LocalPort, o.PacketsPerFrame,
-                            o.PayloadBytes, 10, 0, 0, 0, true);
-                        _syntheticRadar.Start();
-                        _radarHealth = "合成数据运行";
-                        EmitLog("毫米波雷达使用 UDP 合成源（演示/测试）");
+                        if (o.RadarAc880Mode)
+                        {
+                            RadarNetwork.ValidateLocalAddress("192.168.221.100");
+                            StartAc880Serial(o);
+                            _radarHealth = "AC880 点云采集中";
+                            EmitLog("毫米波模式：AC880 实时点云（192.168.221.2 -> 192.168.221.100:5001）");
+                        }
+                        else
+                        {
+                            if (!o.RadarSynthetic)
+                            {
+                                o.LocalIp = RadarNetwork.ValidateLocalAddress(o.LocalIp);
+                                EmitLog("雷达网络检查：" + RadarNetwork.Describe(o.LocalIp));
+                            }
+                            _radar = new RadarSink(_take, _tb, o.PacketsPerFrame, o.PayloadBytes, EmitLog,
+                                _radarPreview, _radarPointCloudPreview);
+                            _radar.Start(o.LocalIp, o.LocalPort, o.BoardIp);
+                            if (o.RadarSynthetic)
+                            {
+                                _syntheticRadar = new SyntheticRadar(o.LocalIp, o.LocalPort, o.PacketsPerFrame,
+                                    o.PayloadBytes, 10, 0, 0, 0, true);
+                                _syntheticRadar.Start();
+                                _radarHealth = "合成数据运行";
+                                EmitLog("毫米波雷达使用 UDP 合成源（演示/测试）");
+                            }
+                            else StartSerial(o);
+                        }
                     }
-                    else StartSerial(o);
+                    catch (Exception ex)
+                    {
+                        _radarError = DynHelper.DescribeException(ex);
+                        _radarHealth = "不可用";
+                        EmitLog("警告：毫米波雷达启动失败，本次跳过雷达并继续采集：" + _radarError);
+                        try { if (_syntheticRadar != null) _syntheticRadar.Dispose(); } catch { }
+                        _syntheticRadar = null;
+                        try { if (_radar != null) _radar.Dispose(); } catch { }
+                        _radar = null;
+                    }
                 }
                 else
                 {
-                    EmitLog("雷达未启用，本次只录相机");
+                    EmitLog("警告：毫米波雷达未启用，本次继续采集其它传感器");
                 }
 
                 if (source != null)
                 {
-                    _camera = new CameraCapture(source, _take, EmitLog, _intrinsics, o.SaveCloud, o.CloudStride, _cameraPreview);
+                    _camera = new CameraCapture(source, _take, EmitLog, _intrinsics, o.SaveCloud, o.CloudStride, _cameraPreview,
+                        delegate(string stream, int frame, double t) { if (_alignment != null) _alignment.AddCamera(stream, frame, t); });
                     _camera.Start();
                     if (o.SaveCloud)
                     {
@@ -302,16 +347,78 @@ namespace Acquire
 
                 if (o.LidarEnabled)
                 {
-                    ILidarSource lidarSource;
-                    if (!string.IsNullOrEmpty(o.LidarReplayDirectory))
-                        lidarSource = new ReplayLidarSource(o.LidarReplayDirectory, delegate { return _tb.ElapsedMs; });
-                    else if (o.LidarSynthetic)
-                        lidarSource = new SyntheticLidarSource(delegate { return _tb.ElapsedMs; });
-                    else
-                        lidarSource = new LivoxNativeSource(o.LidarBroadcastCode, delegate { return _tb.ElapsedMs; });
-                    _lidar = new LidarCapture(lidarSource, _take, _lidarPreview, EmitLog);
-                    _lidar.Start();
-                    EmitLog("LiDAR 启动：" + lidarSource.Model + "，回波模式 " + o.LidarReturnMode);
+                    try
+                    {
+                        ILidarSource lidarSource;
+                        if (!string.IsNullOrEmpty(o.LidarReplayDirectory))
+                            lidarSource = new ReplayLidarSource(o.LidarReplayDirectory, delegate { return _tb.ElapsedMs; });
+                        else if (o.LidarSynthetic)
+                            lidarSource = new SyntheticLidarSource(delegate { return _tb.ElapsedMs; });
+                        else
+                            lidarSource = new LivoxNativeSource(o.LidarBroadcastCode,
+                                delegate(long timestamp) { return _tb.RelMsFromTimestamp(timestamp); });
+                        _lidar = new LidarCapture(lidarSource, _take, _lidarPreview, EmitLog,
+                            delegate(LidarBatch batch, string file) { if (_alignment != null) _alignment.AddLidar(batch, file); });
+                        _lidar.Start();
+                        EmitLog("LiDAR 启动：" + lidarSource.Model + "，回波模式 " + o.LidarReturnMode);
+                    }
+                    catch (Exception ex)
+                    {
+                        _lidarError = DynHelper.DescribeException(ex);
+                        EmitLog("警告：LiDAR 启动失败，本次跳过 LiDAR 并继续采集：" + _lidarError);
+                        try { if (_lidar != null) _lidar.Dispose(); } catch { }
+                        _lidar = null;
+                    }
+                }
+                else EmitLog("警告：LiDAR 未启用，本次继续采集其它传感器");
+
+                if (o.FrameAlignmentEnabled)
+                {
+                    EmitLog("三传感器帧对齐：相机/LiDAR 先启动，等待 LiDAR 1000 ms 预缓存后再启动 ADC 雷达");
+                    DateTime waitStart = DateTime.UtcNow;
+                    while (!_stopRequested)
+                    {
+                        CameraCaptureStats cameraReady = _camera == null ? null : _camera.Snapshot();
+                        LidarCaptureStats lidarReady = _lidar == null ? null : _lidar.Snapshot();
+                        bool cameraOk = cameraReady != null && (!o.Camera.HasDepth || cameraReady.DepthFrames > 0);
+                        bool lidarOk = lidarReady != null && lidarReady.Batches > 0 &&
+                            !double.IsNaN(lidarReady.FirstRelMs) && !double.IsNaN(lidarReady.LastRelMs) &&
+                            lidarReady.LastRelMs - lidarReady.FirstRelMs >= 1000.0;
+                        if (cameraOk && lidarOk) break;
+                        if ((DateTime.UtcNow - waitStart).TotalSeconds >= 10.0)
+                            throw new InvalidOperationException("三传感器对齐启动失败：相机深度或 LiDAR 1000 ms 预缓存未就绪");
+                        Thread.Sleep(50);
+                    }
+                    if (o.RadarEnabled)
+                    {
+                        try
+                        {
+                            if (!o.RadarSynthetic)
+                            {
+                                o.LocalIp = RadarNetwork.ValidateLocalAddress(o.LocalIp);
+                                EmitLog("雷达网络检查：" + RadarNetwork.Describe(o.LocalIp));
+                            }
+                            _radar = new RadarSink(_take, _tb, o.PacketsPerFrame, o.PayloadBytes, EmitLog,
+                                _radarPreview, _radarPointCloudPreview,
+                                delegate(RadarFrameStat stat) { if (_alignment != null) _alignment.AddRadar(stat); });
+                            _radar.Start(o.LocalIp, o.LocalPort, o.BoardIp);
+                            if (o.RadarSynthetic)
+                            {
+                                _syntheticRadar = new SyntheticRadar(o.LocalIp, o.LocalPort, o.PacketsPerFrame,
+                                    o.PayloadBytes, 10, 0, 0, 0, true);
+                                _syntheticRadar.Start();
+                                _radarHealth = "合成数据运行";
+                            }
+                            else StartSerial(o);
+                            _alignmentRadarStartMs = _tb.ElapsedMs;
+                            EmitLog("ADC 雷达已启动，正式采集计时从雷达启动时刻开始");
+                        }
+                        catch (Exception ex)
+                        {
+                            _radarError = DynHelper.DescribeException(ex);
+                            throw new InvalidOperationException("ADC 雷达启动失败：" + _radarError, ex);
+                        }
+                    }
                 }
 
                 _state = SessionState.Recording;
@@ -324,9 +431,11 @@ namespace Acquire
                 bool cameraRecordingConfirmed = false;
                 while (!_stopRequested)
                 {
-                    double elapsed = _tb.ElapsedSeconds;
+                    double elapsed = o.FrameAlignmentEnabled && !double.IsNaN(_alignmentRadarStartMs)
+                        ? (_tb.ElapsedMs - _alignmentRadarStartMs) / 1000.0 : _tb.ElapsedSeconds;
                     if (elapsed >= o.DurationSeconds) break;
-                    if (_radar != null && !o.RadarSynthetic) MonitorRadar(o, elapsed);
+                    if (_radar != null && !o.RadarSynthetic && !o.RadarAc880Mode) MonitorRadar(o, elapsed);
+                    MonitorOptionalStreams(elapsed);
                     if (!cameraRecordingConfirmed && _camera != null)
                     {
                         CameraCaptureStats cameraNow = _camera.Snapshot();
@@ -339,9 +448,10 @@ namespace Acquire
                         }
                         else if (elapsed >= 3.0)
                         {
-                            throw new InvalidOperationException(
-                                "相机进入记录后 3 秒仍未落盘：彩色 " + cameraNow.ColorFrames + " 帧，深度 " +
-                                cameraNow.DepthFrames + " 帧。已停止采集，请关闭占用相机的程序并重新插拔 USB。");
+                            cameraRecordingConfirmed = true;
+                            _cameraRuntimeWarning = true;
+                            EmitLog("警告：相机进入记录后 3 秒仍未完整落盘（彩色 " + cameraNow.ColorFrames +
+                                    " 帧，深度 " + cameraNow.DepthFrames + " 帧），其它传感器继续采集");
                         }
                     }
                     Thread.Sleep(25);
@@ -354,8 +464,9 @@ namespace Acquire
                 StopSerial();
                 if (_syntheticRadar != null) _syntheticRadar.Stop();
                 // 时长与结束时刻在停止任何采集器之前就固定，避免把 MAT 写盘耗时算进采集时长
-                _actualSeconds = _tb.ElapsedSeconds;
-                _recordEndUtc = _tb.UtcFromRelMs(_actualSeconds * 1000.0);
+                _actualSeconds = o.FrameAlignmentEnabled && !double.IsNaN(_alignmentRadarStartMs)
+                    ? (_tb.ElapsedMs - _alignmentRadarStartMs) / 1000.0 : _tb.ElapsedSeconds;
+                _recordEndUtc = _tb.UtcFromRelMs((o.FrameAlignmentEnabled && !double.IsNaN(_alignmentRadarStartMs) ? _alignmentRadarStartMs : 0) + _actualSeconds * 1000.0);
                 EmitLog("停止采集，开始落盘");
 
                 if (_camera != null)
@@ -363,14 +474,14 @@ namespace Acquire
                     _camera.Stop();
                     _cameraStats = _camera.Snapshot();
                 }
-                if (_radar != null)
-                {
-                    _radarSummary = _radar.Stop();
-                }
                 if (_lidar != null)
                 {
                     _lidar.Stop();
                     _lidarStats = _lidar.Snapshot();
+                }
+                if (_radar != null)
+                {
+                    _radarSummary = _radar.Stop();
                 }
 
                 WriteOutputs(o);
@@ -430,7 +541,7 @@ namespace Acquire
 
         private void ValidateCameraFrames(ICameraSource source, CameraOption expected)
         {
-            bool needColor = expected != null && expected.HasColor;
+            bool needColor = expected != null && (expected.HasColor || expected.Kind == CameraKind.OpenNi2);
             bool needDepth = expected != null && expected.HasDepth;
             bool gotColor = false;
             bool gotDepth = false;
@@ -479,6 +590,35 @@ namespace Acquire
             _nextRadarRecoveryAt = 1.0;
         }
 
+        private void StartAc880Serial(SessionOptions o)
+        {
+            List<PortCandidate> candidates = string.IsNullOrEmpty(o.SerialPortName)
+                ? SerialControl.AutoCandidates()
+                : new List<PortCandidate> { new PortCandidate(o.SerialPortName, "AC880 雷达控制串口") };
+            if (candidates.Count == 0) throw new InvalidOperationException("AC880 模式未发现雷达控制串口（README 默认 COM3）");
+            foreach (PortCandidate candidate in candidates)
+            {
+                SerialControl serial = new SerialControl(EmitLog);
+                string error;
+                if (!serial.TryOpen(candidate.Name, o.SerialBaud, out error))
+                {
+                    serial.Dispose();
+                    EmitLog("AC880 模式串口 " + candidate.Name + " 打开失败：" + error);
+                    continue;
+                }
+                _serial = serial;
+                _serialPortUsed = candidate.Name;
+                if (_serial.SendStop()) _serialPauseSent++;
+                EmitLog("AC880 启动前已发 Stop D001，等待 750 ms 清理上次会话");
+                Thread.Sleep(750);
+                if (!_serial.SendStart()) throw new InvalidOperationException("AC880 模式无法向 " + candidate.Name + " 发送 Start D000");
+                _serialStartSent++;
+                EmitLog("AC880 模式已发 Start D000，等待实时点云");
+                return;
+            }
+            throw new InvalidOperationException("AC880 模式无法打开任何雷达控制串口");
+        }
+
         private void MonitorRadar(SessionOptions o, double elapsed)
         {
             long packets = _radar.ReceivedPacketsNow;
@@ -497,6 +637,12 @@ namespace Acquire
             }
 
             double silentSeconds = elapsed - _lastRadarProgressAt;
+            if (!_radarRuntimeWarning && ((!_radarEverHealthy && elapsed >= 3.0) ||
+                (_radarEverHealthy && silentSeconds >= 3.0)))
+            {
+                _radarRuntimeWarning = true;
+                EmitLog("警告：毫米波雷达超过 3 秒没有有效 ADC 数据，其它传感器继续采集");
+            }
             double threshold = _radarEverHealthy ? 2.0 : 1.0;
             if (silentSeconds < threshold || elapsed < _nextRadarRecoveryAt) return;
 
@@ -520,6 +666,36 @@ namespace Acquire
                 _serialSendsOnCandidate++;
             }
             _nextRadarRecoveryAt = elapsed + 1.0;
+        }
+
+        private void MonitorOptionalStreams(double elapsed)
+        {
+            if (_camera != null && !_cameraRuntimeWarning)
+            {
+                CameraCaptureStats camera = _camera.Snapshot();
+                bool colorDisconnected = _cameraOption != null && _cameraOption.HasColor && camera.ColorFrames > 0 &&
+                    elapsed * 1000.0 - camera.LastColorRelMs >= 3000.0;
+                bool depthDisconnected = _cameraOption != null && _cameraOption.HasDepth && camera.DepthFrames > 0 &&
+                    elapsed * 1000.0 - camera.LastDepthRelMs >= 3000.0;
+                if (colorDisconnected || depthDisconnected || !string.IsNullOrEmpty(camera.LastError))
+                {
+                    _cameraRuntimeWarning = true;
+                    EmitLog("警告：相机" + (colorDisconnected || depthDisconnected ? "超过 3 秒没有新帧" : "采集故障：" + camera.LastError) +
+                            "，其它传感器继续采集");
+                }
+            }
+            if (_lidar != null && !_lidarRuntimeWarning)
+            {
+                LidarCaptureStats lidar = _lidar.Snapshot();
+                bool noData = elapsed >= 3.0 && lidar.Batches == 0;
+                bool disconnected = lidar.Batches > 0 && elapsed * 1000.0 - lidar.LastRelMs >= 3000.0;
+                if (noData || disconnected || !string.IsNullOrEmpty(lidar.Error))
+                {
+                    _lidarRuntimeWarning = true;
+                    EmitLog("警告：LiDAR " + (noData ? "3 秒内没有点云" : (disconnected ? "超过 3 秒没有新点云" : "采集故障：" + lidar.Error)) +
+                            "，其它传感器继续采集");
+                }
+            }
         }
 
         private void OpenCurrentSerial(SessionOptions o, bool recovery)
@@ -555,7 +731,12 @@ namespace Acquire
             SerialControl serial = _serial;
             if (serial != null && serial.IsOpen)
             {
-                if (serial.SendPause()) _serialPauseSent++;
+                if (_options != null && _options.RadarAc880Mode)
+                {
+                    if (serial.SendStop()) _serialPauseSent++;
+                    EmitLog("AC880 模式已发 Stop D001；下一轮独立采集前需按 README 重启 AC880");
+                }
+                else if (serial.SendPause()) _serialPauseSent++;
             }
             if (serial != null) serial.Close();
             _radarHealth = "已停止";
@@ -581,8 +762,9 @@ namespace Acquire
             {
                 if (_take != null && _tb != null)
                 {
-                    _actualSeconds = _tb.ElapsedSeconds;
-                    _recordEndUtc = _tb.UtcFromRelMs(_actualSeconds * 1000.0);
+                    _actualSeconds = o != null && o.FrameAlignmentEnabled && !double.IsNaN(_alignmentRadarStartMs)
+                        ? (_tb.ElapsedMs - _alignmentRadarStartMs) / 1000.0 : _tb.ElapsedSeconds;
+                    _recordEndUtc = _tb.UtcFromRelMs((o != null && o.FrameAlignmentEnabled && !double.IsNaN(_alignmentRadarStartMs) ? _alignmentRadarStartMs : 0) + _actualSeconds * 1000.0);
                     WriteOutputs(o);
                 }
             }
@@ -612,6 +794,18 @@ namespace Acquire
             meta.Add("actualDurationSeconds", Math.Round(duration, 3));
             meta.Add("recordStartUtc", _recordStartUtc.ToString("o", CultureInfo.InvariantCulture));
             meta.Add("recordEndUtc", _recordEndUtc.ToString("o", CultureInfo.InvariantCulture));
+            JsonObject alignment = new JsonObject();
+            alignment.Add("enabled", o.FrameAlignmentEnabled);
+            alignment.Add("master", o.FrameAlignmentEnabled ? "ADT7880 radar frame center" : null);
+            alignment.Add("lidarWindowMs", o.FrameAlignmentEnabled ? 1000 : 0);
+            alignment.Add("maxCameraDeltaMs", o.FrameAlignmentEnabled ? 30 : 0);
+            alignment.Add("radarStartPrebufferMs", o.FrameAlignmentEnabled && !double.IsNaN(_alignmentRadarStartMs) ? Math.Round(_alignmentRadarStartMs, 3) : 0);
+            alignment.Add("frames", _alignment == null ? 0 : _alignment.Count);
+            alignment.Add("validFrames", _alignment == null ? 0 : _alignment.ValidCount);
+            alignment.Add("file", _alignment == null ? null : "aligned_frames.csv");
+            meta.Add("alignment", alignment);
+            if (o.CalibrationInstallation != null)
+                meta.Add("calibrationInstallation", o.CalibrationInstallation.ToJson());
 
             JsonObject timebase = new JsonObject();
             timebase.Add("clock", "Stopwatch/QueryPerformanceCounter");
@@ -622,11 +816,15 @@ namespace Acquire
             meta.Add("timebase", timebase);
 
             JsonObject radarObj = new JsonObject();
-            radarObj.Add("enabled", o.RadarEnabled);
-            radarObj.Add("source", o.RadarSynthetic ? "synthetic-udp" : "ADT7880");
+            bool radarAvailable = radar != null && radar.ReceivedPackets > 0;
+            radarObj.Add("requested", o.RadarEnabled);
+            radarObj.Add("enabled", radarAvailable);
+            radarObj.Add("available", radarAvailable);
+            radarObj.Add("source", !o.RadarEnabled ? null : (o.RadarSynthetic ? "synthetic-udp" : "ADT7880"));
+            radarObj.Add("startupError", string.IsNullOrEmpty(_radarError) ? null : (object)_radarError);
             radarObj.Add("packetsPerFrame", o.PacketsPerFrame);
             radarObj.Add("payloadBytes", o.PayloadBytes);
-            if (radar != null && o.RadarEnabled)
+            if (radar != null)
             {
                 radarObj.Add("frames", radar.FramesSeen);
                 radarObj.Add("completeFrames", radar.FramesComplete);
@@ -661,24 +859,33 @@ namespace Acquire
 
             LidarCaptureStats lidar = _lidarStats;
             JsonObject lidarObj = new JsonObject();
-            lidarObj.Add("enabled", o.LidarEnabled);
-            lidarObj.Add("model", !string.IsNullOrEmpty(o.LidarReplayDirectory) ? "Livox binary replay" : (o.LidarSynthetic ? "Livox MID-70 synthetic" : "Livox MID-70"));
+            bool lidarAvailable = lidar != null && lidar.Batches > 0;
+            lidarObj.Add("requested", o.LidarEnabled);
+            lidarObj.Add("enabled", lidarAvailable);
+            lidarObj.Add("available", lidarAvailable);
+            lidarObj.Add("model", !o.LidarEnabled ? null : (!string.IsNullOrEmpty(o.LidarReplayDirectory) ? "Livox binary replay" : (o.LidarSynthetic ? "Livox MID-70 synthetic" : "Livox MID-70")));
             lidarObj.Add("broadcastCode", string.IsNullOrEmpty(o.LidarBroadcastCode) ? null : (object)o.LidarBroadcastCode);
+            lidarObj.Add("actualBroadcastCode", string.IsNullOrEmpty(_lidarSerial) ? null : (object)_lidarSerial);
+            lidarObj.Add("firmware", string.IsNullOrEmpty(_lidarFirmware) ? null : (object)_lidarFirmware);
             lidarObj.Add("returnMode", o.LidarReturnMode);
-            lidarObj.Add("source", !string.IsNullOrEmpty(o.LidarReplayDirectory) ? "replay" : (o.LidarSynthetic ? "synthetic" : "Livox-SDK"));
+            lidarObj.Add("source", !o.LidarEnabled ? null : (!string.IsNullOrEmpty(o.LidarReplayDirectory) ? "replay" : (o.LidarSynthetic ? "synthetic" : "Livox-SDK")));
             lidarObj.Add("batches", lidar == null ? 0 : lidar.Batches);
             lidarObj.Add("points", lidar == null ? 0 : lidar.Points);
             lidarObj.Add("fps", lidar == null ? 0 : Math.Round(lidar.Fps, 3));
             lidarObj.Add("bytes", lidar == null ? 0 : lidar.Bytes);
             lidarObj.Add("dir", lidar != null && lidar.Batches > 0 ? "lidar" : null);
-            lidarObj.Add("format", "LIVOXBIN_V1: sequence, host t_rel_ms, device timestamp raw64, XYZ float32 + reflectivity uint8");
-            lidarObj.Add("coordinateFrame", "sensor: X right, Y up, Z forward");
-            lidarObj.Add("timeSync", o.LidarSynthetic || !string.IsNullOrEmpty(o.LidarReplayDirectory) ? "shared host Stopwatch" : "host receive time; device timestamp_type/PTP/PPS pending hardware validation");
-            lidarObj.Add("error", lidar == null || string.IsNullOrEmpty(lidar.Error) ? null : (object)lidar.Error);
+            lidarObj.Add("format", "LIVOXBIN_V3: lossless LivoxRawPoint XYZ int32 millimetres + reflectivity uint8, per-packet device timestamp/type and host QPC/t_rel; V1/V2 replay compatible");
+            lidarObj.Add("coordinateFrame", "Livox sensor frame: X forward, Y left, Z up");
+            lidarObj.Add("timeSync", o.LidarSynthetic || !string.IsNullOrEmpty(o.LidarReplayDirectory) ? "shared host Stopwatch" : "native callback QPC plus device timestamp/type; PTP/PPS pending hardware validation");
+            lidarObj.Add("droppedNativeBatches", lidar == null ? 0 : lidar.DroppedBatches);
+            string lidarRuntimeError = lidar == null ? "" : lidar.Error;
+            lidarObj.Add("startupError", string.IsNullOrEmpty(_lidarError) ? null : (object)_lidarError);
+            lidarObj.Add("error", string.IsNullOrEmpty(lidarRuntimeError) ? null : (object)lidarRuntimeError);
             meta.Add("lidar", lidarObj);
 
         JsonObject serialObj = new JsonObject();
-        serialObj.Add("enabled", o.RadarEnabled);
+        serialObj.Add("requested", o.RadarEnabled && !o.RadarSynthetic);
+        serialObj.Add("enabled", radarAvailable && !o.RadarSynthetic);
         serialObj.Add("port", _serialPortUsed.Length > 0 ? _serialPortUsed : null);
         serialObj.Add("baudRate", o.SerialBaud);
         serialObj.Add("startSent", _serialStartSent);
@@ -721,6 +928,10 @@ namespace Acquire
             meta.Add("depth", depth);
 
             JsonObject camera = new JsonObject();
+            bool cameraRequested = o.Camera != null;
+            bool cameraAvailable = cam != null && (cam.ColorFrames > 0 || cam.DepthFrames > 0);
+            camera.Add("requested", cameraRequested);
+            camera.Add("available", cameraAvailable);
             camera.Add("kind", o.Camera == null ? "None" : o.Camera.Kind.ToString());
             camera.Add("model", o.Camera == null ? "" : o.Camera.Model);
             camera.Add("serial", o.Camera == null ? "" : o.Camera.Serial);
@@ -728,7 +939,9 @@ namespace Acquire
             camera.Add("backend", o.Camera == null ? "" : o.Camera.Backend);
             camera.Add("activeModes", _cameraModeNote);
             camera.Add("droppedFrames", cam == null ? (object)0 : (object)cam.DroppedFrames);
-            camera.Add("note", _cameraError.Length > 0 ? _cameraError : (o.SelfTest ? "self-test 使用合成相机" : ""));
+            camera.Add("startupError", _cameraError.Length > 0 ? (object)_cameraError : null);
+            camera.Add("runtimeError", cam != null && !string.IsNullOrEmpty(cam.LastError) ? (object)cam.LastError : null);
+            camera.Add("note", !cameraRequested ? "本次未启用相机" : (_cameraError.Length > 0 ? _cameraError : (o.SelfTest ? "self-test 使用合成相机" : "")));
 
             // 内参：优先用后端实际给到的那一档；没有就按标称值兜底，并写明来源
             DepthIntrinsics intrinsics = _intrinsics;
@@ -758,9 +971,15 @@ namespace Acquire
                 warnings.Add("深度内参非标定值（source=" + intrinsics.Source +
                              "），主点按图像中心假设、无畸变模型；2 m 处横向误差可达 2~3 cm。" +
                              "要精确请在 exe 同目录放 calib.json");;
-            if (radar != null && o.RadarEnabled && radar.ReceivedPackets == 0)
+            if (!o.RadarEnabled) warnings.Add("毫米波雷达未启用");
+            else if (!radarAvailable)
                 warnings.Add("雷达未收到任何数据包，radar_adc.mat 未生成");
+            if (_radarError.Length > 0) warnings.Add("雷达启动失败：" + _radarError);
+            if (_radarRuntimeWarning) warnings.Add("毫米波雷达记录期间超过 3 秒没有有效 ADC 数据，其它传感器已继续采集");
+            if (!cameraRequested) warnings.Add("RGB-D 相机未启用");
             if (_cameraError.Length > 0) warnings.Add("相机启动失败：" + _cameraError);
+            if (_cameraRuntimeWarning) warnings.Add("相机记录开始后 3 秒内未完整落盘，其它传感器已继续采集");
+            if (cam != null && !string.IsNullOrEmpty(cam.LastError)) warnings.Add("相机采集错误：" + cam.LastError);
             if (o.Camera != null && !o.Camera.HasDepth) warnings.Add("相机没有深度流，depth 目录为空");
             if (radar != null && radar.PacketLogRetained)
                 warnings.Add("radar_adc.mat 超过 MAT v5 4 GiB 上限，已保留原始包日志 " + Path.GetFileName(radar.PacketLogPath));
@@ -768,12 +987,24 @@ namespace Acquire
                 warnings.Add("勾选了“同时存点云”，但没有写出任何 cloud\\*.ply（无可用内参或写入失败）");
             if (cam != null && cam.DroppedFrames > 0)
                 warnings.Add("写图队列丢帧 " + cam.DroppedFrames + " 帧（落盘跟不上，可检查磁盘/杀毒扫描）");
-            if (o.LidarEnabled && !o.LidarSynthetic && (lidar == null || lidar.Batches == 0))
+            if (!o.LidarEnabled) warnings.Add("LiDAR 未启用");
+            else if (!lidarAvailable)
                 warnings.Add("MID-70 真机未采到点云；需要 LivoxBridge.dll、官方 Livox-SDK 与设备联调");
+            if (_lidarError.Length > 0) warnings.Add("LiDAR 启动失败：" + _lidarError);
+            if (_lidarRuntimeWarning) warnings.Add("LiDAR 记录期间没有点云或发生断流，其它传感器已继续采集");
+            if (!string.IsNullOrEmpty(lidarRuntimeError)) warnings.Add("LiDAR 采集错误：" + lidarRuntimeError);
             if (_error.Length > 0) warnings.Add("会话异常：" + _error);
             meta.Add("warnings", warnings);
             meta.Add("error", _error.Length > 0 ? _error : null);
+            bool realCamera = o.Camera != null && o.Camera.Kind != CameraKind.Null;
+            bool validForCalibration = radarAvailable && lidarAvailable && cameraAvailable &&
+                cam.ColorFrames > 0 && cam.DepthFrames > 0 && realCamera && !o.RadarSynthetic &&
+                !o.LidarSynthetic && string.IsNullOrEmpty(o.LidarReplayDirectory) && _error.Length == 0 &&
+                string.IsNullOrEmpty(_radarError) && string.IsNullOrEmpty(_lidarError) &&
+                string.IsNullOrEmpty(_cameraError) && string.IsNullOrEmpty(lidarRuntimeError);
+            meta.Add("validForCalibration", validForCalibration);
 
+            if (_alignment != null) _alignment.Write(_take.Directory);
             _take.WriteAll(meta);
             EmitLog("manifest / meta 已写入，共 " + _take.RowCount + " 行");
         }
@@ -849,6 +1080,7 @@ namespace Acquire
 
         public CameraPreviewFrame TakeCameraPreview() { return _cameraPreview.Take(); }
         public RadarPreviewFrame TakeRadarPreview() { return _radarPreview.Take(); }
+        public RadarCloudFrame TakeRadarPointCloudPreview() { return _radarPointCloudPreview.Take(); }
         public LidarBatch TakeLidarPreview() { return _lidarPreview.Take(); }
 
         private void EmitLog(string text)

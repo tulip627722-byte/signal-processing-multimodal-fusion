@@ -182,6 +182,13 @@ namespace Acquire
             return sent;
         }
 
+        public bool SendStop()
+        {
+            bool sent = SendCommand(1, TinyFrameCodec.TypeStop);
+            if (sent) PauseSent++;
+            return sent;
+        }
+
         public bool SendCommand(uint id, ushort type)
         {
             SerialPort serial = _port;

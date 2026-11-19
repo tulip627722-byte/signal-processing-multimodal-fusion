@@ -51,17 +51,20 @@ namespace Acquire
                 double angle = radius * maxAngle;
                 double distance = 4.5 + 0.55 * Math.Sin(azimuth * 3 + phase) + (_random.NextDouble() - 0.5) * 0.03;
                 double lateral = Math.Tan(angle) * distance;
-                points[i].X = (float)(Math.Cos(azimuth) * lateral);
-                points[i].Y = (float)(Math.Sin(azimuth) * lateral);
-                points[i].Z = (float)distance;
-                points[i].Reflectivity = (byte)(70 + 170 * radius);
+                points[i] = LidarPoint.FromMeters((float)distance,
+                    (float)(Math.Cos(azimuth) * lateral), (float)(Math.Sin(azimuth) * lateral),
+                    (byte)(70 + 170 * radius));
             }
             _sequence++;
+            double relMs = _clock();
+            long deviceTimestamp = (long)(_pacer.Elapsed.TotalMilliseconds * 1000000.0);
             return new LidarBatch
             {
-                DeviceTimestampRaw = (long)(_pacer.Elapsed.TotalMilliseconds * 1000000.0),
-                RelMs = _clock(),
+                DeviceTimestampRaw = deviceTimestamp, RelMs = relMs, EndRelMs = relMs,
+                TimestampType = 0, PacketCount = 1,
                 Points = points,
+                Packets = new[] { new LidarPacketInfo { DeviceTimestampRaw = deviceTimestamp,
+                    RelMs = relMs, PointStart = 0, PointCount = count } },
                 Count = count,
                 Sequence = _sequence
             };

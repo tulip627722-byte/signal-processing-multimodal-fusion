@@ -11,8 +11,8 @@ namespace Acquire
 {
     internal sealed class MainForm : Form
     {
-        private ComboBox _cameraBox, _lidarMode;
-        private Button _refreshButton, _browseButton, _startButton, _stopButton, _alignButton;
+        private ComboBox _cameraBox, _radarMode, _lidarMode;
+        private Button _refreshButton, _browseButton, _startButton, _stopButton, _alignButton, _installationButton;
         private Label _cameraInfo, _stateLabel, _detailLabel;
         private CheckBox _radarEnabled, _lidarEnabled, _saveCloud, _soundEnabled;
         private TextBox _localIp, _boardIp, _lidarCode, _labelBox, _outputBox, _logBox;
@@ -25,20 +25,37 @@ namespace Acquire
         private PointCloudPreviewControl _lidarPreview;
         private System.Windows.Forms.Timer _timer;
         private SessionController _controller;
+        private IdleCameraPreview _idleCameraPreview;
+        private IdleLidarPreview _idleLidarPreview;
+        private IdleRadarPreview _idleRadarPreview;
+        private Ac880PointCloudReceiver _radarCloudReceiver;
         private List<CameraOption> _cameras = new List<CameraOption>();
         private readonly bool _demoMode;
-        private bool _closing, _wasBusy, _alignRunning;
+        private bool _closing, _wasBusy, _alignRunning, _probingCameras;
         private string _lastShownError = "";
+        private CalibrationInstallationConfig _installation;
 
         public MainForm() : this(false) { }
 
         public MainForm(bool demoMode)
         {
             _demoMode = demoMode;
+            _installation = CalibrationInstallationConfig.Load();
             BuildUi();
             _controller = new SessionController();
             _controller.Log += AppendLog;
-            ProbeCameras();
+            _idleCameraPreview = new IdleCameraPreview(AppendLog);
+            _idleLidarPreview = new IdleLidarPreview(AppendLog);
+            _idleRadarPreview = new IdleRadarPreview(AppendLog);
+            _radarCloudReceiver = new Ac880PointCloudReceiver(AppendLog);
+            _radarCloudReceiver.Start();
+            _cameraInfo.Text = "正在探测相机…";
+            Shown += delegate
+            {
+                BeginInvoke(new Action(ProbeCameras));
+                BeginInvoke(new Action(RestartIdleRadarPreview));
+                if (!_demoMode) BeginInvoke(new Action(ShowInstallationSettings));
+            };
             _timer = new System.Windows.Forms.Timer { Interval = 100 };
             _timer.Tick += delegate { RefreshStatus(); };
             _timer.Start();
@@ -70,23 +87,29 @@ namespace Acquire
             Controls.Add(config);
             config.Controls.Add(MakeLabel("相机", 12, 11, 38));
             _cameraBox = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Bounds = new Rectangle(52, 7, 340, 25) };
-            _cameraBox.SelectedIndexChanged += delegate { ShowCameraDetail(); }; config.Controls.Add(_cameraBox);
+            _cameraBox.SelectedIndexChanged += delegate { ShowCameraDetail(); RestartIdleCameraPreview(); }; config.Controls.Add(_cameraBox);
             _refreshButton = new Button { Text = "重新探测", Bounds = new Rectangle(398, 6, 82, 27) };
             _refreshButton.Click += delegate { ProbeCameras(); }; config.Controls.Add(_refreshButton);
             _cameraInfo = new Label { Bounds = new Rectangle(490, 11, 500, 20), ForeColor = Color.FromArgb(83, 99, 113) }; config.Controls.Add(_cameraInfo);
 
-            _radarEnabled = new CheckBox { Text = "ADT7880", Checked = true, Bounds = new Rectangle(12, 41, 88, 24) }; config.Controls.Add(_radarEnabled);
-            config.Controls.Add(MakeLabel("本机", 104, 44, 34));
-            _localIp = new TextBox { Text = "192.168.220.10", Bounds = new Rectangle(140, 40, 116, 25) }; config.Controls.Add(_localIp);
-            _localPort = Number(1, 65535, 8080, 262, 40, 68); config.Controls.Add(_localPort);
-            config.Controls.Add(MakeLabel("雷达", 338, 44, 34));
-            _boardIp = new TextBox { Text = "192.168.220.100", Bounds = new Rectangle(374, 40, 116, 25) }; config.Controls.Add(_boardIp);
+            _radarEnabled = new CheckBox { Text = "ADT7880", Checked = true, Bounds = new Rectangle(12, 41, 88, 24) };
+            _radarEnabled.CheckedChanged += delegate { RestartIdleRadarPreview(); }; config.Controls.Add(_radarEnabled);
+            _radarMode = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Bounds = new Rectangle(104, 40, 178, 25) };
+            _radarMode.Items.AddRange(new object[] { "ADC 直连 + PC 实时点云", "AC880 板端点云" });
+            _radarMode.SelectedIndex = 0;
+            _radarMode.SelectedIndexChanged += delegate { UpdateRadarModeUi(); RestartIdleRadarPreview(); };
+            config.Controls.Add(_radarMode);
+            _localIp = new TextBox { Text = "192.168.220.10", Bounds = new Rectangle(288, 40, 106, 25) }; config.Controls.Add(_localIp);
+            _localPort = Number(1, 65535, 8080, 400, 40, 64); config.Controls.Add(_localPort);
+            _boardIp = new TextBox { Text = "192.168.220.100", Bounds = new Rectangle(470, 40, 116, 25) }; config.Controls.Add(_boardIp);
 
-            _lidarEnabled = new CheckBox { Text = "Livox MID-70", Checked = false, Bounds = new Rectangle(510, 41, 110, 24) }; config.Controls.Add(_lidarEnabled);
-            _lidarMode = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Bounds = new Rectangle(622, 40, 180, 25) };
+            _lidarEnabled = new CheckBox { Text = "Livox MID-70", Checked = false, Bounds = new Rectangle(600, 41, 110, 24) };
+            _lidarEnabled.CheckedChanged += delegate { RestartIdleLidarPreview(); }; config.Controls.Add(_lidarEnabled);
+            _lidarMode = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Bounds = new Rectangle(712, 40, 138, 25) };
             _lidarMode.Items.AddRange(new object[] { "模拟点云（无硬件）", "MID-70 真机" }); _lidarMode.SelectedIndex = 0;
-            _lidarMode.SelectedIndexChanged += delegate { _lidarCode.Enabled = _lidarMode.SelectedIndex == 1; }; config.Controls.Add(_lidarMode);
-            _lidarCode = new TextBox { Bounds = new Rectangle(808, 40, 182, 25), Text = "广播码（真机）", Enabled = false }; config.Controls.Add(_lidarCode);
+            _lidarMode.SelectedIndexChanged += delegate { _lidarCode.Enabled = _lidarMode.SelectedIndex == 1; RestartIdleLidarPreview(); }; config.Controls.Add(_lidarMode);
+            _lidarCode = new TextBox { Bounds = new Rectangle(856, 40, 134, 25), Text = "", Enabled = false }; config.Controls.Add(_lidarCode);
+            _lidarCode.Leave += delegate { RestartIdleLidarPreview(); };
 
             config.Controls.Add(MakeLabel("延迟", 12, 77, 34)); _delayBox = Number(0, 60, 3, 50, 73, 52); config.Controls.Add(_delayBox);
             config.Controls.Add(MakeLabel("s   时长", 106, 77, 55)); _durationBox = Number(1, 600, 20, 162, 73, 60); config.Controls.Add(_durationBox);
@@ -98,6 +121,8 @@ namespace Acquire
             config.Controls.Add(MakeLabel("深度显示", 282, 111, 60));
             _depthMin = DecimalNumber(0.1M, 20, 0.5M, 344, 107, 58); _depthMax = DecimalNumber(0.2M, 50, 7.0M, 434, 107, 58);
             config.Controls.Add(_depthMin); config.Controls.Add(MakeLabel("—", 408, 111, 20)); config.Controls.Add(_depthMax); config.Controls.Add(MakeLabel("m", 496, 111, 20));
+            _installationButton = new Button { Text = "安装位置…", Bounds = new Rectangle(530, 106, 105, 28) };
+            _installationButton.Click += delegate { ShowInstallationSettings(); }; config.Controls.Add(_installationButton);
 
             _startButton = new Button { Text = "开始同步采集", Bounds = new Rectangle(1010, 10, 180, 38), BackColor = Color.FromArgb(22, 125, 116), ForeColor = Color.White, FlatStyle = FlatStyle.Flat, Font = new Font(Font, FontStyle.Bold) };
             _startButton.Click += delegate { StartCapture(false); }; config.Controls.Add(_startButton);
@@ -108,6 +133,8 @@ namespace Acquire
             _stateLabel = new Label { Text = "空闲", Font = new Font(Font.FontFamily, 12F, FontStyle.Bold), Bounds = new Rectangle(1010, 98, 95, 28) }; config.Controls.Add(_stateLabel);
             _detailLabel = new Label { Text = "等待采集", Bounds = new Rectangle(1110, 102, 268, 22), ForeColor = Color.FromArgb(83, 99, 113) }; config.Controls.Add(_detailLabel);
             _progress = new ProgressBar { Bounds = new Rectangle(1010, 128, 368, 10), Maximum = 100 }; config.Controls.Add(_progress);
+
+            UpdateRadarModeUi();
 
             TableLayoutPanel previews = new TableLayoutPanel { Dock = DockStyle.None, Bounds = new Rectangle(0, 206, ClientSize.Width, ClientSize.Height - 312), Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right, Padding = new Padding(12, 8, 12, 5), BackColor = Color.FromArgb(226, 234, 242), ColumnCount = 2, RowCount = 2 };
             previews.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50)); previews.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
@@ -142,6 +169,23 @@ namespace Acquire
             }
         }
 
+        private void ShowInstallationSettings()
+        {
+            if (_controller != null && _controller.IsBusy) return;
+            CalibrationInstallationConfig edited = _installation.Clone();
+            if (!CalibrationInstallationDialog.ShowDialog(this, edited)) return;
+            _installation = edited;
+            AppendLog("安装位置已保存：LiDAR [" + FormatVector(_installation.LidarOriginInRadarM) + "] m；MATLAB 将自动读取 " + CalibrationInstallationConfig.SharedPath);
+        }
+
+        private static string FormatVector(double[] value)
+        {
+            return value == null || value.Length < 3 ? "?" :
+                value[0].ToString("+0.0000;-0.0000", System.Globalization.CultureInfo.InvariantCulture) + ", " +
+                value[1].ToString("+0.0000;-0.0000", System.Globalization.CultureInfo.InvariantCulture) + ", " +
+                value[2].ToString("+0.0000;-0.0000", System.Globalization.CultureInfo.InvariantCulture);
+        }
+
         private static string DefaultTakeRoot()
         {
             string exeDir = AppDomain.CurrentDomain.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar);
@@ -151,6 +195,8 @@ namespace Acquire
 
         private void ProbeCameras()
         {
+            _probingCameras = true;
+            if (_idleCameraPreview != null) _idleCameraPreview.Stop();
             _refreshButton.Enabled = false;
             try
             {
@@ -166,7 +212,12 @@ namespace Acquire
                 _cameraInfo.Text = CameraProbe.Summarize(_cameras);
             }
             catch (Exception ex) { AppendLog("相机探测异常：" + ex.Message); }
-            finally { _refreshButton.Enabled = true; }
+            finally
+            {
+                _refreshButton.Enabled = true;
+                _probingCameras = false;
+                RestartIdleCameraPreview();
+            }
         }
 
         private void ShowCameraDetail()
@@ -176,24 +227,119 @@ namespace Acquire
             _cameraInfo.ForeColor = option.Kind == CameraKind.Null ? Color.FromArgb(187, 91, 15) : Color.FromArgb(83, 99, 113);
         }
 
+        private void RestartIdleCameraPreview()
+        {
+            if (_closing || _probingCameras || _demoMode || _idleCameraPreview == null || _controller == null || _controller.IsBusy) return;
+            CameraOption option = _cameraBox.SelectedItem as CameraOption;
+            _idleCameraPreview.Start(option);
+        }
+
+        private void RestartIdleLidarPreview()
+        {
+            if (_idleLidarPreview == null) return;
+            _idleLidarPreview.Stop();
+            if (_closing || _demoMode || _controller == null || _controller.IsBusy) return;
+            if (_lidarEnabled.Checked && _lidarMode.SelectedIndex == 1)
+                _idleLidarPreview.Start(_lidarCode.Text.Trim());
+        }
+
+        private void UpdateRadarModeUi()
+        {
+            if (_radarMode == null || _localIp == null) return;
+            bool adcMode = _radarMode.SelectedIndex == 0;
+            _localIp.Enabled = adcMode;
+            _localPort.Enabled = adcMode;
+            _boardIp.Enabled = adcMode;
+        }
+
+        private void RestartIdleRadarPreview()
+        {
+            if (_idleRadarPreview == null) return;
+            _idleRadarPreview.Stop();
+            if (_closing || _demoMode || _controller == null || _controller.IsBusy || !_radarEnabled.Checked) return;
+            if (_radarMode.SelectedIndex == 0)
+                _idleRadarPreview.Start(_localIp.Text.Trim(), (int)_localPort.Value, _boardIp.Text.Trim());
+        }
+
         private void StartDemo() { _delayBox.Value = 0; _durationBox.Value = 600; _soundEnabled.Checked = false; _labelBox.Text = "multiview-demo"; _lidarEnabled.Checked = true; _lidarMode.SelectedIndex = 0; StartCapture(true); }
 
         private void StartCapture(bool demo)
         {
             if (_controller.IsBusy) return;
+            bool ac880Mode = !demo && _radarEnabled.Checked && _radarMode.SelectedIndex == 1;
+            if (ac880Mode && (_radarCloudReceiver == null || !_radarCloudReceiver.PeerOnline))
+            {
+                MessageBox.Show(this,
+                    "没有收到 AC880 心跳（192.168.221.2:5001），不能开始实时点云采集。\r\n\r\n" +
+                    "请按 RealtimeRadarKit_Research_Lite README 检查：\r\n" +
+                    "1. AC880 使用该运行包的 BOOT.BIN / STEERING.BIN / CAPTURE.TXT；\r\n" +
+                    "2. 先开 AC880，PS 口接电脑，电脑网卡为 192.168.221.100/24；\r\n" +
+                    "3. 雷达网口接 AC880 PL 口，不是直接接电脑。",
+                    "AC880 未上线", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
             CameraOption option = _cameraBox.SelectedItem as CameraOption;
-            if (option == null || !option.Available) { if (!demo) MessageBox.Show(this, "请选择可用相机来源。", "无法开始"); return; }
-            if (option.Kind == CameraKind.Null && !demo && MessageBox.Show(this, "当前为合成测试画面，不是真实相机。仍要继续？", "合成数据", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
-            if (_lidarEnabled.Checked && _lidarMode.SelectedIndex == 0 && !demo && MessageBox.Show(this, "当前 LiDAR 来源为模拟点云，不是真实 MID-70。仍要写入本次采集？", "合成数据", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
+            if (demo && (option == null || !option.Available)) return;
+            bool frameAlignment = !demo && _radarEnabled.Checked && _radarMode.SelectedIndex == 0 &&
+                _lidarEnabled.Checked && _lidarMode.SelectedIndex == 1 && option != null && option.Available &&
+                option.Kind != CameraKind.Null && option.HasDepth;
+            if (!demo && _radarEnabled.Checked && _radarMode.SelectedIndex == 0)
+            {
+                List<string> alignmentErrors = new List<string>();
+                if (option == null || !option.Available || option.Kind == CameraKind.Null) alignmentErrors.Add("未选择可用 RGB-D 相机");
+                else if (!option.HasDepth) alignmentErrors.Add("所选相机没有深度流");
+                if (!_lidarEnabled.Checked || _lidarMode.SelectedIndex != 1) alignmentErrors.Add("LiDAR 必须选择 MID-70 真机");
+                if (alignmentErrors.Count > 0)
+                {
+                    MessageBox.Show(this, "ADC 三传感器帧对齐不能启动：\r\n\r\n• " + string.Join("\r\n• ", alignmentErrors.ToArray()) +
+                        "\r\n\r\n请同时启用 ADT7880 ADC、MID-70 真机和带深度流的相机。", "传感器未就绪", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+            }
+
+            CameraOption sessionCamera = option;
+            List<string> warnings = new List<string>();
+            if (!demo)
+            {
+                if (option == null || !option.Available || option.Kind == CameraKind.Null)
+                {
+                    warnings.Add("RGB-D 相机未连接或不可用（本次跳过相机）");
+                    sessionCamera = null;
+                }
+                if (!_radarEnabled.Checked) warnings.Add("ADT7880 毫米波雷达未启用");
+                if (!_lidarEnabled.Checked) warnings.Add("Livox MID-70 未启用");
+                else if (_lidarMode.SelectedIndex != 1) warnings.Add("Livox 当前为模拟点云，不是真实 MID-70");
+
+                if (warnings.Count > 0)
+                {
+                    string message = "检测到以下传感器未就绪：\r\n\r\n• " +
+                        string.Join("\r\n• ", warnings.ToArray()) +
+                        "\r\n\r\n仍可继续采集，其余可用传感器会正常记录。是否继续？";
+                    if (MessageBox.Show(this, message, "部分传感器不可用", MessageBoxButtons.YesNo,
+                        MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
+                }
+            }
             int port = demo ? FindFreeUdpPort() : (int)_localPort.Value;
             SessionOptions session = new SessionOptions
             {
                 OutputRoot = _outputBox.Text.Trim(), Label = _labelBox.Text.Trim(), DelaySeconds = (int)_delayBox.Value, DurationSeconds = (int)_durationBox.Value,
-                RadarEnabled = _radarEnabled.Checked, RadarSynthetic = demo, LocalIp = demo ? "127.0.0.1" : _localIp.Text.Trim(), LocalPort = port, BoardIp = demo ? "" : _boardIp.Text.Trim(),
-                Camera = option, SaveCloud = _saveCloud.Checked, SoundCues = _soundEnabled.Checked, SelfTest = option.Kind == CameraKind.Null,
+                RadarEnabled = _radarEnabled.Checked, RadarSynthetic = demo, RadarAc880Mode = ac880Mode, LocalIp = demo ? "127.0.0.1" : _localIp.Text.Trim(), LocalPort = port, BoardIp = demo ? "" : _boardIp.Text.Trim(),
+                Camera = sessionCamera, SaveCloud = _saveCloud.Checked, SoundCues = _soundEnabled.Checked, SelfTest = demo && sessionCamera != null && sessionCamera.Kind == CameraKind.Null,
                 LidarEnabled = _lidarEnabled.Checked, LidarSynthetic = _lidarMode.SelectedIndex == 0, LidarBroadcastCode = _lidarCode.Text.Trim()
+                , CalibrationInstallation = _installation.Clone(), FrameAlignmentEnabled = frameAlignment
             };
-            try { _controller.Start(session); } catch (Exception ex) { if (!demo) MessageBox.Show(this, ex.Message, "启动失败", MessageBoxButtons.OK, MessageBoxIcon.Error); AppendLog("启动失败：" + ex.Message); }
+            if (_idleCameraPreview != null) _idleCameraPreview.Stop();
+            if (_idleLidarPreview != null) _idleLidarPreview.Stop();
+            if (_idleRadarPreview != null) _idleRadarPreview.Stop();
+            try { _controller.Start(session); }
+            catch (Exception ex)
+            {
+                if (!demo) MessageBox.Show(this, ex.Message, "启动失败", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                AppendLog("启动失败：" + ex.Message);
+                RestartIdleCameraPreview();
+                RestartIdleLidarPreview();
+                RestartIdleRadarPreview();
+            }
         }
 
         private static int FindFreeUdpPort() { using (UdpClient probe = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0))) return ((IPEndPoint)probe.Client.LocalEndPoint).Port; }
@@ -202,10 +348,55 @@ namespace Acquire
         {
             if (_closing) return;
             SessionSnapshot s = _controller.Snapshot();
+            double displayedColorFps = s.ColorFps;
+            double displayedDepthFps = s.DepthFps;
+            string idlePreviewStatus = "";
             CameraPreviewFrame camera = _controller.TakeCameraPreview();
-            if (camera != null) { _colorPreview.SetFrame(camera, s.ColorFps); _depthPreview.MinMeters = (double)_depthMin.Value; _depthPreview.MaxMeters = (double)_depthMax.Value; _depthPreview.SetFrame(camera, s.DepthFps); }
-            RadarPreviewFrame radar = _controller.TakeRadarPreview(); if (radar != null) _radarPreview.SetFrame(radar, s.RadarFps);
-            LidarBatch lidar = _controller.TakeLidarPreview(); if (lidar != null) _lidarPreview.SetBatch(lidar, s.LidarFps, s.LidarHealth);
+            if (s.State == SessionState.Idle && _idleCameraPreview != null)
+            {
+                camera = _idleCameraPreview.TakeFrame() ?? camera;
+                _idleCameraPreview.Snapshot(out displayedColorFps, out displayedDepthFps, out idlePreviewStatus);
+            }
+            if (camera != null) { _colorPreview.SetFrame(camera, displayedColorFps); _depthPreview.MinMeters = (double)_depthMin.Value; _depthPreview.MaxMeters = (double)_depthMax.Value; _depthPreview.SetFrame(camera, displayedDepthFps); }
+            bool radarCloudOnline;
+            double radarCloudFps;
+            long radarCloudFrames, radarCloudMissing, radarCloudBad;
+            string radarCloudStatus;
+            _radarCloudReceiver.Snapshot(out radarCloudOnline, out radarCloudFps, out radarCloudFrames,
+                out radarCloudMissing, out radarCloudBad, out radarCloudStatus);
+            RadarCloudFrame radarCloud = _radarCloudReceiver.TakeFrame();
+            RadarCloudFrame pcRadarCloud = _controller.TakeRadarPointCloudPreview();
+            double idleRadarFps = 0;
+            long idleRadarPackets = 0;
+            string idleRadarStatus = "";
+            if (s.State == SessionState.Idle && _idleRadarPreview != null)
+            {
+                RadarCloudFrame idleCloud = _idleRadarPreview.TakeFrame();
+                if (idleCloud != null) pcRadarCloud = idleCloud;
+                _idleRadarPreview.Snapshot(out idleRadarFps, out idleRadarPackets, out idleRadarStatus);
+            }
+            RadarPreviewFrame radar = _controller.TakeRadarPreview();
+            bool usingAc880 = _radarMode.SelectedIndex == 1;
+            if (!usingAc880 && pcRadarCloud != null)
+                _radarPreview.SetPointCloud(pcRadarCloud, s.RadarFps, "PC 端 FFT / CFAR / Bartlett / 聚类");
+            else if (usingAc880 && radarCloud != null)
+                _radarPreview.SetPointCloud(radarCloud, radarCloudFps, radarCloudStatus);
+            else if (usingAc880 && radarCloudOnline)
+                _radarPreview.SetPointCloudStatus(radarCloudStatus);
+            else if (radar != null)
+                _radarPreview.SetFrame(radar, s.RadarFps);
+            else if (usingAc880)
+                _radarPreview.SetPointCloudStatus(radarCloudStatus);
+            double displayedLidarRate = s.LidarFps;
+            long displayedLidarPoints = s.LidarPoints;
+            string displayedLidarStatus = s.LidarHealth;
+            LidarBatch lidar = _controller.TakeLidarPreview();
+            if (s.State == SessionState.Idle && _idleLidarPreview != null)
+            {
+                lidar = _idleLidarPreview.TakeBatch() ?? lidar;
+                _idleLidarPreview.Snapshot(out displayedLidarRate, out displayedLidarPoints, out displayedLidarStatus);
+            }
+            if (lidar != null) _lidarPreview.SetBatch(lidar, displayedLidarRate, displayedLidarStatus);
             switch (s.State)
             {
                 case SessionState.Countdown: _stateLabel.Text = "倒计时 " + s.CountdownRemaining + " s"; _stateLabel.ForeColor = Color.DarkOrange; break;
@@ -215,19 +406,22 @@ namespace Acquire
             }
             bool idle = s.State == SessionState.Idle;
             if (_wasBusy && idle && !string.IsNullOrEmpty(s.Error) && s.Error != _lastShownError && !_demoMode) { _lastShownError = s.Error; MessageBox.Show(this, FriendlyError(s.Error), "采集失败", MessageBoxButtons.OK, MessageBoxIcon.Error); }
+            if (_wasBusy && idle) { RestartIdleCameraPreview(); RestartIdleLidarPreview(); RestartIdleRadarPreview(); }
             _wasBusy = !idle; SetEditingEnabled(idle);
             if (s.State == SessionState.Recording) { _progress.Value = Math.Min(100, (int)(s.ElapsedSeconds * 100 / Math.Max(1, (double)_durationBox.Value))); _detailLabel.Text = s.ElapsedSeconds.ToString("0.0") + " s  |  预览 " + s.PreviewLatencyMs.ToString("0") + " ms  |  覆盖 " + s.PreviewDropped; }
-            else { _progress.Value = 0; _detailLabel.Text = string.IsNullOrEmpty(s.Error) ? s.Message : "错误：" + FriendlyErrorTitle(s.Error); }
-            _radarStatus.Text = "毫米波 " + s.RadarFps.ToString("0.0") + " FPS  帧 " + s.RadarFrames + "  丢 " + s.RadarMissing + (s.RadarRestarts > 0 ? "  恢复 " + s.RadarRestarts : "");
-            _cameraStatus.Text = "RGB " + s.ColorFps.ToString("0.0") + " / Depth " + s.DepthFps.ToString("0.0") + " FPS";
-            _lidarStatus.Text = "MID-70 " + s.LidarHealth + "  " + s.LidarFps.ToString("0.0") + " 批/s  " + s.LidarPoints.ToString("N0") + " 点";
+            else { _progress.Value = 0; _detailLabel.Text = idle && !string.IsNullOrEmpty(idlePreviewStatus) ? idlePreviewStatus : (string.IsNullOrEmpty(s.Error) ? s.Message : "错误：" + FriendlyErrorTitle(s.Error)); }
+            _radarStatus.Text = usingAc880 && radarCloudOnline
+                ? "毫米波点云 " + radarCloudFps.ToString("0.0") + " FPS  帧 " + radarCloudFrames + "  缺 " + radarCloudMissing + "  坏 " + radarCloudBad
+                : "毫米波 PC 点云 / ADC " + (idle ? idleRadarFps : s.RadarFps).ToString("0.0") + " FPS  帧 " + s.RadarFrames + "  丢 " + s.RadarMissing + (s.RadarRestarts > 0 ? "  恢复 " + s.RadarRestarts : "") + (idle && !string.IsNullOrEmpty(idleRadarStatus) ? "  " + idleRadarStatus : "");
+            _cameraStatus.Text = "RGB " + displayedColorFps.ToString("0.0") + " / Depth " + displayedDepthFps.ToString("0.0") + " FPS" + (idle ? "  预览" : "");
+            _lidarStatus.Text = "MID-70 " + displayedLidarStatus + "  " + displayedLidarRate.ToString("0.0") + " 包/s  " + displayedLidarPoints.ToString("N0") + " 点";
             _remainStatus.Text = s.State == SessionState.Recording ? "剩余 " + s.RemainingSeconds.ToString("0.0") + " s" : ShortPath(s.TakeDirectory);
         }
 
         private void SetEditingEnabled(bool enabled)
         {
-            _startButton.Enabled = enabled; _stopButton.Enabled = !enabled; _cameraBox.Enabled = enabled; _refreshButton.Enabled = enabled; _radarEnabled.Enabled = enabled; _lidarEnabled.Enabled = enabled; _lidarMode.Enabled = enabled;
-            _lidarCode.Enabled = enabled && _lidarMode.SelectedIndex == 1; _localIp.Enabled = enabled; _localPort.Enabled = enabled; _boardIp.Enabled = enabled; _delayBox.Enabled = enabled; _durationBox.Enabled = enabled;
+            _startButton.Enabled = enabled; _stopButton.Enabled = !enabled; _cameraBox.Enabled = enabled; _refreshButton.Enabled = enabled; _radarEnabled.Enabled = enabled; _radarMode.Enabled = enabled; _lidarEnabled.Enabled = enabled; _lidarMode.Enabled = enabled;
+            _lidarCode.Enabled = enabled && _lidarMode.SelectedIndex == 1; _localIp.Enabled = enabled && _radarMode.SelectedIndex == 0; _localPort.Enabled = enabled && _radarMode.SelectedIndex == 0; _boardIp.Enabled = enabled && _radarMode.SelectedIndex == 0; _delayBox.Enabled = enabled; _durationBox.Enabled = enabled;
             _labelBox.Enabled = enabled; _outputBox.Enabled = enabled; _browseButton.Enabled = enabled; _saveCloud.Enabled = enabled; _soundEnabled.Enabled = enabled;
         }
 
@@ -262,7 +456,7 @@ namespace Acquire
         private void OnFormClosing(object sender, FormClosingEventArgs e)
         {
             if (_controller != null && _controller.IsBusy && !_demoMode && MessageBox.Show(this, "采集仍在进行，关闭会停止并落盘。继续？", "确认关闭", MessageBoxButtons.YesNo) != DialogResult.Yes) { e.Cancel = true; return; }
-            _closing = true; if (_timer != null) _timer.Stop(); if (_controller != null) try { _controller.Dispose(); } catch { }
+            _closing = true; if (_timer != null) _timer.Stop(); if (_idleRadarPreview != null) try { _idleRadarPreview.Dispose(); } catch { } if (_radarCloudReceiver != null) try { _radarCloudReceiver.Dispose(); } catch { } if (_idleLidarPreview != null) try { _idleLidarPreview.Dispose(); } catch { } if (_idleCameraPreview != null) try { _idleCameraPreview.Dispose(); } catch { } if (_controller != null) try { _controller.Dispose(); } catch { }
         }
     }
 }

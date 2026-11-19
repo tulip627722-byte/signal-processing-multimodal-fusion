@@ -14,6 +14,18 @@ namespace Acquire
         public string File;
     }
 
+    internal sealed class LidarBatchRow
+    {
+        public int Sequence;
+        public double FirstRelMs;
+        public double LastRelMs;
+        public long DeviceTimestampRaw;
+        public byte TimestampType;
+        public int PacketCount;
+        public int PointCount;
+        public string File;
+    }
+
     /// <summary>
     /// 一个 take 目录的产物管理：目录结构、manifest.csv、radar_frames.csv、depth_scale.txt、meta.json。
     /// 三路共用同一个 Timebase 换算 t_utc，manifest 落盘时按 t_rel_ms 排序。
@@ -24,6 +36,7 @@ namespace Acquire
         private readonly Timebase _tb;
         private readonly List<ManifestRow> _rows = new List<ManifestRow>();
         private readonly List<RadarFrameStat> _radarFrames = new List<RadarFrameStat>();
+        private readonly List<LidarBatchRow> _lidarBatches = new List<LidarBatchRow>();
         private double? _depthScale;
 
         public string Directory { get; private set; }
@@ -84,6 +97,19 @@ namespace Acquire
             lock (_gate) _radarFrames.Add(stat);
         }
 
+        public void AddLidarBatch(LidarBatch batch, string file)
+        {
+            lock (_gate)
+            {
+                _lidarBatches.Add(new LidarBatchRow
+                {
+                    Sequence = batch.Sequence, FirstRelMs = batch.RelMs, LastRelMs = batch.EndRelMs,
+                    DeviceTimestampRaw = batch.DeviceTimestampRaw, TimestampType = batch.TimestampType,
+                    PacketCount = batch.PacketCount, PointCount = batch.Count, File = "lidar/" + file
+                });
+            }
+        }
+
         /// <summary>点云目录按需创建：不勾选“同时存点云”时不留空目录。</summary>
         public void EnsureCloudDirectory()
         {
@@ -111,17 +137,20 @@ namespace Acquire
         {
             List<ManifestRow> rows;
             List<RadarFrameStat> frames;
+            List<LidarBatchRow> lidarBatches;
             double? depthScale;
             lock (_gate)
             {
                 rows = new List<ManifestRow>(_rows);
                 frames = new List<RadarFrameStat>(_radarFrames);
+                lidarBatches = new List<LidarBatchRow>(_lidarBatches);
                 depthScale = _depthScale;
             }
 
             rows.Sort(CompareRows);
             WriteManifest(rows);
             WriteRadarFrames(frames);
+            WriteLidarFrames(lidarBatches);
             if (meta != null) WriteMeta(meta);
             if (!depthScale.HasValue && !File.Exists(Path.Combine(Directory, "depth_scale.txt")))
             {
@@ -177,6 +206,26 @@ namespace Acquire
                 sb.Append(s.Missing.ToString(CultureInfo.InvariantCulture)).Append("\r\n");
             }
             File.WriteAllText(Path.Combine(Directory, "radar_frames.csv"), sb.ToString(), new UTF8Encoding(false));
+        }
+
+        private void WriteLidarFrames(List<LidarBatchRow> rows)
+        {
+            if (rows.Count == 0) return;
+            rows.Sort(delegate(LidarBatchRow a, LidarBatchRow b) { return a.Sequence.CompareTo(b.Sequence); });
+            StringBuilder sb = new StringBuilder(rows.Count * 96 + 128);
+            sb.Append("batch,first_t_rel_ms,last_t_rel_ms,device_timestamp_raw,timestamp_type,packets,points,file\r\n");
+            foreach (LidarBatchRow row in rows)
+            {
+                sb.Append(row.Sequence.ToString(CultureInfo.InvariantCulture)).Append(',');
+                sb.Append(FormatRelMs(row.FirstRelMs)).Append(',');
+                sb.Append(FormatRelMs(row.LastRelMs)).Append(',');
+                sb.Append(row.DeviceTimestampRaw.ToString(CultureInfo.InvariantCulture)).Append(',');
+                sb.Append(row.TimestampType.ToString(CultureInfo.InvariantCulture)).Append(',');
+                sb.Append(row.PacketCount.ToString(CultureInfo.InvariantCulture)).Append(',');
+                sb.Append(row.PointCount.ToString(CultureInfo.InvariantCulture)).Append(',');
+                sb.Append(EscapeCsv(row.File)).Append("\r\n");
+            }
+            File.WriteAllText(Path.Combine(Directory, "lidar_frames.csv"), sb.ToString(), new UTF8Encoding(false));
         }
 
         private void WriteMeta(JsonObject meta)

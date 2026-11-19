@@ -70,6 +70,7 @@ namespace Acquire
         private readonly int _cloudStride;
         private readonly HashSet<string> _warned = new HashSet<string>();
         private readonly LatestPreview<CameraPreviewFrame> _preview;
+        private readonly Action<string, int, double> _frameWritten;
         private readonly List<Pending> _slots = new List<Pending>();
         private readonly Queue<Pending> _queue = new Queue<Pending>();
         private Thread _reader;
@@ -95,7 +96,8 @@ namespace Acquire
 
         public CameraCapture(ICameraSource source, TakeWriter take, Action<string> log,
                              DepthIntrinsics intrinsics, bool saveCloud, int cloudStride,
-                             LatestPreview<CameraPreviewFrame> preview)
+                             LatestPreview<CameraPreviewFrame> preview,
+                             Action<string, int, double> frameWritten = null)
         {
             _source = source;
             _take = take;
@@ -104,6 +106,7 @@ namespace Acquire
             _saveCloud = saveCloud && intrinsics != null && intrinsics.Valid;
             _cloudStride = cloudStride < 1 ? DepthCloud.DefaultStride : cloudStride;
             _preview = preview;
+            _frameWritten = frameWritten;
             for (int i = 0; i < QueueCapacity; i++) _slots.Add(new Pending());
         }
 
@@ -369,6 +372,7 @@ namespace Acquire
                 _stats.ColorHeight = slot.ColorHeight;
             }
             _take.AddRow("color", slot.ColorIndex, rel, "color/" + name);
+            if (_frameWritten != null) _frameWritten("color", slot.ColorIndex, rel);
         }
 
         private void WriteDepth(Pending slot)
@@ -390,6 +394,7 @@ namespace Acquire
                 _stats.DepthScaleMeters = slot.DepthScale;
             }
             _take.AddRow("depth", slot.DepthIndex, rel, "depth/" + name);
+            if (_frameWritten != null) _frameWritten("depth", slot.DepthIndex, rel);
             if (_saveCloud) WriteCloud(slot);
         }
 

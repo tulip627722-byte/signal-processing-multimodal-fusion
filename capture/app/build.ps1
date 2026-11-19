@@ -14,6 +14,12 @@ if (-not (Test-Path -LiteralPath $compiler)) {
 
 New-Item -ItemType Directory -Force -Path $outputDir | Out-Null
 
+$deployScript = Join-Path $projectDir 'deploy-orbbec-runtime.ps1'
+if (-not (Test-Path -LiteralPath $deployScript)) {
+    throw "Orbbec runtime deploy script not found: $deployScript"
+}
+& $deployScript -OutputDirectory $outputDir
+
 $sources = Get-ChildItem -LiteralPath (Join-Path $projectDir 'src') -Recurse -Filter '*.cs' |
     Sort-Object FullName |
     ForEach-Object { $_.FullName }
@@ -32,6 +38,7 @@ $compilerArgs = @(
     '/reference:System.Drawing.dll'
     '/reference:System.Windows.Forms.dll'
     '/reference:System.Management.dll'
+    '/reference:System.Numerics.dll'
 ) + $sources
 
 & $compiler $compilerArgs

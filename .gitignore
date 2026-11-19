@@ -15,6 +15,7 @@ capture/app/*-selftest.txt
 capture/app/*-selftest.err
 capture/app/*-capture.txt
 capture/app/*-capture.err
+capture/app/orbbec_factory_calibration.json
 capture/app/final-stress.txt
 capture/app/final-stress.err
 *.mat
@@ -41,6 +42,7 @@ capture/app/final-stress.err
 # C# build outputs and local SDKs
 **/bin/
 **/obj/
+**/build/
 *.exe
 *.dll
 *.pdb
@@ -49,6 +51,8 @@ capture/app/final-stress.err
 
 # Vendor firmware projects and hardware exports
 firmware/
+vendor/
+.deps/
 *.xsa
 *.bit
 *.elf

@@ -5,6 +5,7 @@ function compute_all(count, opts)
 %   compute_all(5)                  % 只看最新 5 组
 %   compute_all([], struct('force', true))     % 全部强制重算
 %   compute_all(5, struct('stride', 4))
+%   compute_all([], struct('autoCalibrate', true))
 %
 % 「算过了」的判定（三条件同时成立才跳过）：
 %   1) results\<take>_res.mat 存在
@@ -21,6 +22,12 @@ if isfield(opts, 'force')
     opts = rmfield(opts, 'force');
 end
 
+autoCalibrate = false;
+if isfield(opts, 'autoCalibrate')
+    autoCalibrate = logical(opts.autoCalibrate);
+    opts = rmfield(opts, 'autoCalibrate');
+end
+
 here = fileparts(mfilename('fullpath'));
 addpath(here, '-begin');
 
@@ -28,6 +35,18 @@ P = paths();
 takesRoot = P.captureTakes;
 if isfield(opts, 'root') && ~isempty(opts.root)
     takesRoot = opts.root;      % 允许指定别的采集根目录（比如 takes\11-4）
+end
+
+calibrationConfig = [];
+if autoCalibrate
+    addpath(fullfile(here, 'lidar'), '-begin');
+    calibrationConfig = lidar_radar_calibration_config();
+    if ~isempty(calibrationConfig.cameraOriginInRadarM)
+        opts.cameraOriginInRadarM = calibrationConfig.cameraOriginInRadarM;
+    end
+    if ~isempty(calibrationConfig.cameraToRadarR)
+        opts.cameraToRadarR = calibrationConfig.cameraToRadarR;
+    end
 end
 resDir = P.takesDir;
 if ~isfolder(takesRoot)
@@ -76,6 +95,28 @@ if ~isempty(skipped)
 end
 if ~isempty(doneNames)
     fprintf('新算 %d 组\n', numel(doneNames));
+end
+
+if autoCalibrate
+    fprintf('\n===== 自动 LiDAR -> 雷达标定 =====\n');
+    try
+        calibrationConfig.dataRoot = takesRoot;
+        calibrationConfig.resultsRoot = resDir;
+        calibrationConfig.takeNames = string(targets(:));
+        calibrationConfig.autoComputeMissingResults = false;
+        report = run_lidar_radar_auto_calibration(calibrationConfig);
+        if isfield(report, 'jsonPath')
+            fprintf('标定候选已生成：%s\n', report.jsonPath);
+        end
+        if isfield(report, 'extrinsics') && isfield(report.extrinsics, 'applicable') && report.extrinsics.applicable
+            fprintf('标定通过；view_take 将自动使用这个最新有效外参。\n');
+        else
+            fprintf(2, '标定结果未通过 applicable 检查；view_take 不会强行融合。\n');
+        end
+    catch ex
+        fprintf(2, '自动标定失败：%s\n', ex.message);
+        fprintf(2, '已保留已有结果；view_take 将继续使用最近一次有效外参。\n');
+    end
 end
 fprintf('\n播放：view_take\n');
 end

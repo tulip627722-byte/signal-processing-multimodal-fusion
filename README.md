@@ -40,6 +40,16 @@
 
 ## 二、目前进展
 
+### 本次主线交付内容
+
+1. **雷达–LiDAR 标定**：完成 ADT7880 与 Livox MID-70 的统一坐标框架、棋盘平面提取、平移标定和留一验证。候选外参与结果图已归档到 [docs/extrinsics/lidar-radar/](docs/extrinsics/lidar-radar/)，算法与复现说明见 [docs/lidar-radar-alignment.md](docs/lidar-radar-alignment.md) 及 `matlab/lidar/`。
+2. **多模态采集程序**：提供 C# WinForms 采集上位机，统一记录雷达 ADC、RGB、深度和 MID-70 数据，包含设备预检、时间轴、丢包统计、回放与无硬件自测。入口见 [capture/README.md](capture/README.md)。
+3. **离线点云融合**：MATLAB 处理雷达距离–多普勒、CFAR、近场 Bartlett、聚类，并将深度与 MID-70 统一变换到 ADT7880 坐标系。播放器和批处理入口见 [matlab/view_take.m](matlab/view_take.m)、[matlab/compute_all.m](matlab/compute_all.m)。
+
+![离线三路点云融合示例](docs/images/offline-pointcloud-fusion.png)
+
+图中红色为毫米波点云，绿色为深度相机点云，蓝色为 MID-70 点云；融合显示仅使用已通过适用性检查的 LiDAR→雷达候选外参。
+
 ### 1. 实现毫米波雷达与相机的坐标对齐
 
 已完成 ADT7880 毫米波雷达与相机的外参标定与坐标投影验证：正式外参留出板心误差由 `0.473 m` 降至 `0.150 m`，五组实验平均三维误差由 `0.359 m` 降至 `0.102 m`，留一验证 `4 / 5` 组达到 `0.15 m` 门限。
@@ -58,8 +68,9 @@
 
 ### 测试状态
 
-- **相机**：已测试成功
-- **毫米波雷达、激光雷达**：尚未进行真机测试
+- **离线雷达–LiDAR 标定**：已使用 3–7 m 五组采集数据完成候选外参拟合与留一验证，结果已归档到 `docs/extrinsics/lidar-radar/`。
+- **采集程序**：C# 程序可编译，并已通过无硬件合成链路的大部分自测；真实设备状态以现场连接和 `meta.json` 为准。
+- **实时真机融合**：仍需在目标机器上确认 MID-70、ADT7880 和相机的实时连接、时间同步与断流恢复。
 
 ---
 
@@ -80,6 +91,16 @@ signal-processing-multimodal-fusion/
 │  ├─ experiments/2026-11-05/  室外 3–7 m 棋盘实验报告
 │  └─ images/              文档配图
 └─ README.md
+take/
+├─ radar_adc.mat             毫米波原始 ADC
+├─ radar_frames.csv          雷达帧完整性和丢包统计
+├─ color/*.png               RGB 帧
+├─ depth/*.png               16-bit 深度帧
+├─ lidar/*.bin               LIVOXBIN_V3 原始笛卡尔记录（兼容读取 V1/V2）
+├─ lidar_frames.csv          LiDAR 批次时间与完整性统计
+├─ depth_scale.txt
+├─ manifest.csv              四路统一时间轴
+└─ meta.json                 设备、模式、内参、帧率、统计与告警
 ```
 
 ---
@@ -107,7 +128,18 @@ cd('E:\leida\radar-camera-alignment\matlab')
 run_compute_interactive
 ```
 
-更多说明见 [capture/README.md](capture/README.md)、[docs/BRANCHES.md](docs/BRANCHES.md)。
+MID-70 原始记录生成 PLY 点云：
+
+```powershell
+cd E:\leida\radar-camera-alignment\capture\app
+.\export-lidar.ps1 -TakeDirectory "完整take目录" -Merged
+```
+
+空间对齐继续以 ADT7880 雷达坐标 `X右 / Y前 / Z上` 为统一坐标：相机使用已有 `camera→radar` 外参，MID-70 使用 `matlab/lidar` 中的 `lidar→radar` 框架。流程见 [docs/lidar-radar-alignment.md](docs/lidar-radar-alignment.md)。
+
+更多采集格式与设备说明见 [capture/README.md](capture/README.md)，自动测试与 30 分钟压力测试结果见 [docs/multiview-validation.md](docs/multiview-validation.md)，MID-70 原生桥接见 [capture/native/LivoxBridge/README.md](capture/native/LivoxBridge/README.md)。
+
+更多分支说明见 [docs/BRANCHES.md](docs/BRANCHES.md)，历史课设资料见 [docs/legacy-course-design/README.md](docs/legacy-course-design/README.md)。
 
 ---
 

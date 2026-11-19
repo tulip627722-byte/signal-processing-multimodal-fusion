@@ -76,10 +76,14 @@ namespace Acquire
         public string Vendor;
         [MarshalAs(UnmanagedType.ByValTStr, SizeConst = Oni2.MaxStr)]
         public string Name;
-        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = Oni2.MaxStr)]
-        public string SerialNumber;
-        public ushort UsbVendorId;
-        public ushort UsbProductId;
+        public int UsbVendorId;
+        public int UsbProductId;
+
+        public string SerialNumber
+        {
+            get { return ""; }
+            set { }
+        }
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -276,6 +280,8 @@ namespace Acquire
             int count;
             int status = GetDeviceList(out array, out count);
             if (status != Oni2.StatusOk || array == IntPtr.Zero || count <= 0) return devices;
+            if (count > 64)
+                throw new InvalidOperationException("OpenNI2 返回异常设备数量：" + count + DescribeError());
             try
             {
                 int size = Marshal.SizeOf(typeof(OniDeviceInfo));

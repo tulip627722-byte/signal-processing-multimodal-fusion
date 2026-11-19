@@ -110,7 +110,9 @@ namespace Acquire
             JsonObject extrinsics = new JsonObject();
             extrinsics.Add("rotationRowMajor", p.RightToLeftRotation);
             extrinsics.Add("translation", p.RightToLeftTranslation);
-            extrinsics.Add("direction", "color/right to depth/left (r2l), units as stored by device");
+            extrinsics.Add("translationUnit", "mm");
+            extrinsics.Add("translationMeters", Scale(p.RightToLeftTranslation, 0.001f));
+            extrinsics.Add("direction", "color/right to depth/left (r2l): P_depth = R * P_color + t");
 
             JsonObject root = new JsonObject();
             root.Add("schema", "orbbec-openni2-factory-calibration-v1");
@@ -133,6 +135,13 @@ namespace Acquire
         {
             // Orbbec raw r_k/l_k is [k1,k2,k3,p1,p2]. ROS/OpenCV expects [k1,k2,p1,p2,k3].
             return new float[] { raw[0], raw[1], raw[3], raw[4], raw[2] };
+        }
+
+        private static float[] Scale(float[] values, float factor)
+        {
+            float[] scaled = new float[values.Length];
+            for (int i = 0; i < values.Length; i++) scaled[i] = values[i] * factor;
+            return scaled;
         }
 
         private static string Validate(ObCameraParams p)

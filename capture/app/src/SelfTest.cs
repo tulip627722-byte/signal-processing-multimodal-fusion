@@ -146,7 +146,8 @@ namespace Acquire
                         SelfTest = true,
                         SaveCloud = true,
                         LidarEnabled = true,
-                        LidarSynthetic = true
+                        LidarSynthetic = true,
+                        CalibrationInstallation = CalibrationInstallationConfig.Load().Clone()
                     };
 
                     using (SessionController controller = new SessionController())
@@ -243,6 +244,22 @@ namespace Acquire
             }
             if (peak == expected) { validation.Pass("实时距离 FFT 已知峰值分箱正确（bin " + peak + "）"); log("  PASS  实时距离 FFT 峰值 bin=" + peak); }
             else { validation.Fail("实时距离 FFT 峰值错误：期望 " + expected + "，实际 " + peak); log("  FAIL  实时距离 FFT 峰值错误"); }
+
+            double expectedResolution = 0.036621826;
+            double actualResolution = RadarPreviewProcessor.DistancePerBin;
+            validation.Require(Math.Abs(actualResolution - expectedResolution) < 1e-6,
+                "实时距离换算使用 60 us 上升沿（" + actualResolution.ToString("0.000000") + " m/bin）");
+
+            double[] spectrum = new double[512];
+            spectrum[6] = 1000;
+            spectrum[10] = 800;
+            spectrum[27] = 400;
+            spectrum[26] = 200;
+            spectrum[28] = 180;
+            int targetPeak = RadarPreviewProcessor.FindTargetPeak(spectrum);
+            validation.Require(targetPeak == 27,
+                "实时目标峰跳过 0.5 m 内近场杂波并选中约 1 m（bin " + targetPeak + "，" +
+                (targetPeak * actualResolution).ToString("0.00") + " m）");
         }
 
         private static void VerifyLidar(Action<string> log, string takeDir, TakeValidation validation)
@@ -254,7 +271,7 @@ namespace Acquire
             {
                 LidarBatch first = LidarBinary.Read(files[0]);
                 if (first.Count > 0 && first.Points != null && first.Points.Length == first.Count)
-                { validation.Pass("LIVOXBIN_V1 可回读（" + files.Length + " 批，首批 " + first.Count + " 点）"); log("  PASS  LiDAR 二进制回读：" + first.Count + " 点"); }
+                { validation.Pass("LIVOXBIN_V3 原始点可回读（" + files.Length + " 批，首批 " + first.Count + " 点）"); log("  PASS  LiDAR 二进制回读：" + first.Count + " 点"); }
                 else { validation.Fail("LiDAR 二进制回读点数无效"); }
 
                 using (ReplayLidarSource replay = new ReplayLidarSource(directory, delegate { return 123.0; }))
