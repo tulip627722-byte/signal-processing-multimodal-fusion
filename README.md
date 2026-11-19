@@ -48,6 +48,12 @@
 
 ![离线三路点云融合示例](docs/images/offline-pointcloud-fusion.png)
 
+### 昨晚雷达–LiDAR 对齐结果
+
+下面这张图是昨晚 3–7 m 五组棋盘数据生成的雷达坐标投影结果：橙色为 LiDAR 安装测量初值，青色为标定后的 LiDAR 板心，绿色为深度棋盘中心。
+
+![雷达–LiDAR 标定前后对齐结果](docs/extrinsics/lidar-radar/lidar-radar-alignment-20261118.png)
+
 图中红色为毫米波点云，绿色为深度相机点云，蓝色为 MID-70 点云；融合显示仅使用已通过适用性检查的 LiDAR→雷达候选外参。
 
 ### 1. 实现毫米波雷达与相机的坐标对齐

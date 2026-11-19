@@ -161,7 +161,9 @@ LiDAR 棋盘中心不再由固定主距离 `±12 mm` 薄片直接求取。算法
 
 本次候选平移为 `[-0.1361, -0.1024, +0.0547] m`，固定轴向转换不变，旋转修正为 `0°`。五组板面倾角为 `4.33°–10.18°`，P95 平面厚度约 `6.8–10.2 mm`。倾斜补偿将拟合误差中位数从 `97.6 mm` 降至 `41.5 mm`，留一验证中位数从 `112.5 mm` 降至 `51.2 mm`；因此候选保持 `applicable=true`。3 m 组仍是误差最大的样本（约 `132.9 mm`），提升正式外参前仍应结合独立姿态验证。
 
-结果图、候选 JSON 和对应关系 CSV 已归档到 `docs/extrinsics/lidar-radar/`：`checkerboard_centers_before_after.png` 显示实景标定前后中心，`tilt_compensation_before_after.png` 对比旧薄片中心与倾斜平面补偿中心，`lidar_radar_correspondences.csv` 保存每组平面法向、倾角、厚度、内点数和中心补偿量。原始 `results/` 目录仍被 Git 忽略，脚本不会覆盖正式外参。
+结果图、候选 JSON 和对应关系 CSV 已归档到 `docs/extrinsics/lidar-radar/`：`lidar-radar-alignment-20261118.png` 是昨晚五组数据的雷达坐标投影总图，`checkerboard_centers_before_after.png` 显示实景标定前后中心，`tilt_compensation_before_after.png` 对比旧薄片中心与倾斜平面补偿中心，`lidar_radar_correspondences.csv` 保存每组平面法向、倾角、厚度、内点数和中心补偿量。原始 `results/` 目录仍被 Git 忽略，脚本不会覆盖正式外参。
+
+![昨晚雷达–LiDAR 对齐总图](extrinsics/lidar-radar/lidar-radar-alignment-20261118.png)
 
 ## 8. 更改安装位置后的自动标定
 
