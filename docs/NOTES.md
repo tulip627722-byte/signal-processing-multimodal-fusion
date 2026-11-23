@@ -40,6 +40,8 @@ corrected = measured - bias
 ## 参数变更
 
 - 修改正式外参、雷达补偿或 FFT 波形参数后必须强制重算结果。
+- 修改深度清理开关或参数同样必须重算。新结果的 `depthPts` 是清理后点云，`depthPtsRaw` 是原始审计抽样；采集目录中的 16-bit PNG 从不改写。
 - 每个结果的 `metaOut` 必须保存实际使用的参数和来源。
 - 不允许将状态为 `FAIL` 或 `applicable=false` 的候选外参用于正式计算。
+- 相机平移候选由 `tools/calibrate_camera_radar_translation.m` 生成。即使状态为 `PASS`，也要先检查五折误差、前后叠加图和 MID-70 辅助结果，再人工替换正式 JSON 并强制重算。
 

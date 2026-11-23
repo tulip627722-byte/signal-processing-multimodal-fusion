@@ -104,6 +104,7 @@ view_take
 - 旧的“每帧用 2% 高度分位数拉到地面”会随场景漂移，默认已关闭；仅可用 `useFloorAlignment=true` 复现旧结果。
 - 外参唯一来源是 `radar_camera_extrinsics.json`。其中 `cameraToRadarR` 把相机点旋转到雷达轴；当前 `cameraOriginInRadarM=[-0.0093,-0.0063,0.1000] m`。X/Y 来自五组同步表面拟合，另一整组随机留出验证；Z=10 cm 仍来自安装测量，因为当前正前方数据不能独立约束垂直平移。
 - `view_take` 的深度点云已经通过相机→雷达外参转换到 ADT7880 坐标；take 同时包含 `lidar_frames.csv` 和 `lidar/*.bin` 时，前三格显示毫米波、深度和 MID-70，第四格直接以 3D 方式叠加三路统一坐标点云，便于检查是否重合。
+- `compute_take` 保留原始 16-bit 深度图不动，并在反投影后执行边缘飞点、小区域、固定 ROI、15 mm 体素和孤立体素清理。`res.mat` 中 `depthPts` 是清理后主点云，`depthPtsRaw` 是按 `stride` 抽样的原始审计点云，`depthFilterStats` 保存逐帧统计。播放器可切换原始/清理显示，融合始终使用清理后主点云。
 - MID-70 默认累计当前毫米波帧之前 1000 ms，可用 `'lidarWindowMs', 500` 等参数调整；第四格不读取 RGB 图片，也不需要连接相机或导出工厂标定。
 - `compute_take` 的抽样模式（`maxFrames`）必须指定 `outputFile`，防止诊断工具覆盖正式 `results/takes/*_res.mat`；正式结果会记录 `resultMode/fullFrameCount/processedFrameCount`。
 - `view_take` 默认扫描 `results/lidar_radar_calibration_*` 并使用最新的 `applicable=true` 外参；也可以显式传入 `lidarExtrinsicsFile`。未找到有效外参时仍可分别查看三类点云，融合画面会显示未启用提示，不会伪造空间叠加。
@@ -116,6 +117,7 @@ view_take
 | `tools\residual_check.m` | 板子差分，量当前参数下的残差（就是上面那张表） |
 | `tools\alignment_report.m` | 把雷达点投影到同步深度图，报告空间残差与时间误差 |
 | `tools\calibrate_extrinsics_from_res.m` | 仅用九组 `res.mat` 点云差分，生成含角度、平移、测距偏差及六折验证的候选外参 |
+| `tools\calibrate_camera_radar_translation.m` | 固定相机轴向旋转，只拟合相机→毫米波平移；输出五折整组留出、测距混淆检查和候选 JSON |
 
 ### 基于 3.2 点云标定三脚架角度
 
@@ -133,6 +135,17 @@ compute_take(takeDir, struct('extrinsicsFile', candidate));
 ```
 
 候选中的 `radarRangeBiasM` 会作为独立雷达测距补偿应用，不会混入相机到雷达的平移向量。
+
+### 清理后重新校准相机平移
+
+```matlab
+cd('E:\leida\radar-camera-alignment\matlab')
+compute_all([], struct('root','E:\leida\11-18','force',true))
+addpath tools
+report = calibrate_camera_radar_translation;
+```
+
+校准器固定 `cameraToRadarR`，只在当前平移附近搜索 `X/Y ±5 cm、Z ±2 cm`。候选必须同时通过整组留出中位 `≤0.15 m`、P90 `≤0.30 m`、相对改善 `≥20%`、不贴搜索边界以及“加入雷达测距偏差后平移变化 `≤2 cm`”门禁，才会标为 `applicable=true`。输出位于 `results/camera_radar_translation_candidate/`，不会自动覆盖正式外参。MID-70 只作辅助检查，因为现有 MID-70 标定曾由深度棋盘中心引导，并非独立真值。
 | `tools\board_diff.m` | 同上，早期版本 |
 | `tools\verify_range.m` | 用 res 点云核对板子距离 |
 

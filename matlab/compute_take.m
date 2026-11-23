@@ -16,7 +16,8 @@ function [resFile, summary] = compute_take(takeDir, opts)
 %   pts{i}      N×6 [X Y Z 强度dB 距离 速度]
 %   labels{i}   N×1 簇编号（0=噪点）
 %   nClusters   簇数
-%   depthPts{i} M×3 米（雷达坐标系，固定安装变换）
+%   depthPts{i} M×3 米（雷达坐标系，清理后主点云）
+%   depthPtsRaw{i} 原始深度反投影的 stride 抽样，用于审计和前后对比
 %   depthCol{i} M×3 uint8 RGB
 %   depthFrame / colorFrame / depthDt / ms
 
@@ -83,7 +84,9 @@ cfg = struct('detectMode', '8T', 'relativeGateRatio', 0.5, ...
              'elevationOffsetDeg', -o.radarElevationBiasDeg); % 门限走默认值（1.53）
 nF = numel(done);
 pts = cell(nF, 1); labels = cell(nF, 1); nClusters = zeros(nF, 1);
-depthPts = cell(nF, 1); depthCol = cell(nF, 1); depthUV = cell(nF, 1);
+depthPts = cell(nF, 1); depthPtsRaw = cell(nF, 1);
+depthCol = cell(nF, 1); depthUV = cell(nF, 1);
+depthFilterStats = repmat(passthrough_stats(0, 0), nF, 1);
 depthFrame = zeros(nF, 1); colorFrame = zeros(nF, 1);
 depthDt = nan(nF, 1); colorDt = nan(nF, 1);
 ms = zeros(nF, 1); radarT = nan(nF, 1);
@@ -113,9 +116,19 @@ for i = 1:nF
     depthDt(i) = al.depthDt(row);
     colorDt(i) = al.colorDt(row);
 
-    [dp, dc, uv] = build_depth_cloud(takeDir, depthFrame(i), colorFrame(i), ...
+    [rawDp, rawDc, rawUv, depthImageSize] = build_depth_cloud(takeDir, depthFrame(i), colorFrame(i), ...
         fx, fy, cx, cy, depthScale, o.stride, o.withColor, o.mirrorDepth, ...
         o.cameraToRadarR, o.cameraOriginInRadarM, o.useFloorAlignment, o.floorZ);
+    rawSample = mod(double(rawUv(:,1)), o.stride) == 0 & mod(double(rawUv(:,2)), o.stride) == 0;
+    depthPtsRaw{i} = single(rawDp(rawSample, :));
+    if o.depthCleaningEnabled
+        [dp, ~, depthFilterStats(i), sourceIndices] = clean_depth_cloud( ...
+            rawDp, rawUv, depthImageSize, o.depthCleaning);
+        dc = rawDc(sourceIndices, :); uv = rawUv(sourceIndices, :);
+    else
+        dp = rawDp(rawSample, :); dc = rawDc(rawSample, :); uv = rawUv(rawSample, :);
+        depthFilterStats(i) = passthrough_stats(size(rawDp,1), size(dp,1));
+    end
     depthPts{i} = single(dp);
     depthCol{i} = dc;
     depthUV{i} = uv;
@@ -142,6 +155,8 @@ metaOut = struct('takeDir', takeDir, 'takeName', takeName, ...
                  'fx', fx, 'fy', fy, 'cx', cx, 'cy', cy, 'depthScale', depthScale, ...
                  'floorZ', o.floorZ, 'stride', o.stride, 'mirrorDepth', o.mirrorDepth, ...
                  'useFloorAlignment', o.useFloorAlignment, ...
+                 'depthCleaningEnabled', o.depthCleaningEnabled, ...
+                 'depthCleaning', o.depthCleaning, ...
                  'cameraToRadarR', o.cameraToRadarR, ...
                  'cameraOriginInRadarM', o.cameraOriginInRadarM, ...
                  'extrinsicsFile', o.extrinsicsFile, ...
@@ -174,7 +189,7 @@ if isfile(o.extrinsicsFile)
 end
 metaOut.sourceStamp = stamp;
 save(resFile, 'frames', 'radarT', 'pts', 'labels', 'nClusters', ...
-     'depthPts', 'depthCol', 'depthUV', 'depthFrame', 'colorFrame', ...
+     'depthPts', 'depthPtsRaw', 'depthFilterStats', 'depthCol', 'depthUV', 'depthFrame', 'colorFrame', ...
      'depthDt', 'colorDt', 'ms', ...
      'metaOut', '-v7.3');
 
@@ -188,11 +203,11 @@ fprintf('看：view_take(''%s'')\n', resFile);
 end
 
 % ============================================================
-function [dp, dc, uv] = build_depth_cloud(takeDir, depthNo, colorNo, fx, fy, cx, cy, ...
+function [dp, dc, uv, imageSize] = build_depth_cloud(takeDir, depthNo, colorNo, fx, fy, cx, cy, ...
     depthScale, stride, withColor, mirror, Rrc, cameraOriginRadar, useFloorAlignment, floorZ)
 if nargin < 10 || isempty(mirror), mirror = true; end   % 深度图默认左右镜像
 if nargin < 9, withColor = false; end
-dp = zeros(0, 3); dc = zeros(0, 3, 'uint8'); uv = zeros(0, 2, 'uint16');
+dp = zeros(0, 3); dc = zeros(0, 3, 'uint8'); uv = zeros(0, 2, 'uint16'); imageSize = [0 0];
 p = fullfile(takeDir, 'depth', sprintf('%06d.png', depthNo));
 if ~isfile(p), return; end
 D = imread(p);
@@ -205,6 +220,7 @@ if mirror
 end
 Zm = double(D) * depthScale;
 [dh, dw] = size(Zm);
+imageSize = [dh dw];
 
 [U, V] = meshgrid(0:dw-1, 0:dh-1);
 Xc = (U - cx) .* Zm / fx;
@@ -226,16 +242,8 @@ if useFloorAlignment
         (floorZ - pctile(radarPoints(:, 3), 2));
 end
 
-valid = valid0;
-if stride > 1
-    keep = false(size(valid));
-    keep(1:stride:end, 1:stride:end) = true;
-    valid = valid & keep;
-end
-
-keepIndex = valid(valid0);
-dp = radarPoints(keepIndex, :);
-uv = uint16([U(valid), V(valid)]);
+dp = radarPoints;
+uv = uint16([U(valid0), V(valid0)]);
 dc = repmat(uint8([150 170 200]), size(dp, 1), 1);
 
 cp = fullfile(takeDir, 'color', sprintf('%06d.png', colorNo));
@@ -245,8 +253,16 @@ if withColor && colorNo > 0 && isfile(cp)
     if size(C, 1) ~= dh || size(C, 2) ~= dw
         R = resize_nn(R, dh, dw); G = resize_nn(G, dh, dw); B = resize_nn(B, dh, dw);
     end
-    dc = uint8(cat(3, R(valid), G(valid), B(valid)));
+    dc = uint8([R(valid0), G(valid0), B(valid0)]);
 end
+end
+
+function stats = passthrough_stats(inputCount, outputCount)
+stats = struct('inputCount', inputCount, 'finiteCount', inputCount, ...
+    'rangeCount', inputCount, 'roiCount', inputCount, 'edgeCount', inputCount, ...
+    'componentCount', inputCount, 'preVoxelCount', inputCount, ...
+    'voxelCount', outputCount, 'outputCount', outputCount, ...
+    'retainedRatio', outputCount / max(inputCount, 1));
 end
 
 % ============================================================
@@ -286,6 +302,7 @@ hasElBias = isfield(o, 'radarElevationBiasDeg');
 d = struct('stride', 4, 'eps', 0.25, 'minPts', 3, 'floorZ', -1.15, 'maxFrames', [], ...
            'outputFile', '', ...
            'withColor', false, 'mirrorDepth', true, ...
+           'depthCleaningEnabled', true, 'depthCleaning', struct(), ...
            'extrinsicsFile', fullfile(here, 'radar_camera_extrinsics.json'), ...
            'radarRangeBiasM', 0, 'radarAzimuthBiasDeg', 0, ...
            'radarElevationBiasDeg', 0, ...
@@ -322,4 +339,16 @@ validateattributes(o.radarRangeBiasM, {'numeric'}, {'scalar', 'finite', 'nonnega
 validateattributes(o.radarAzimuthBiasDeg, {'numeric'}, {'scalar', 'finite'});
 validateattributes(o.radarElevationBiasDeg, {'numeric'}, {'scalar', 'finite'});
 o.cameraOriginInRadarM = reshape(double(o.cameraOriginInRadarM), 1, 3);
+o.depthCleaning = depth_cleaning_defaults(o.depthCleaning);
+end
+
+function o = depth_cleaning_defaults(o)
+d = struct('rangeM', [0.3 12], 'edgeThresholdM', 0.025, ...
+    'edgeRelativeThreshold', 0.015, 'minimumLocalSamples', 4, ...
+    'minimumComponentPixels', 6, 'roiX', [-3 3], 'roiY', [0 9], ...
+    'roiZ', [-1.4 1.6], 'voxelM', 0.015, 'minVoxelNeighbors', 1);
+fields = fieldnames(d);
+for index = 1:numel(fields)
+    if ~isfield(o, fields{index}), o.(fields{index}) = d.(fields{index}); end
+end
 end

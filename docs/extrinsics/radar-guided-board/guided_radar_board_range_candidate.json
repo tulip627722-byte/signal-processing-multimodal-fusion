@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "model": "geometry_bearing_plus_corrected_radar_range",
+  "rangeBiasM": 0.18277468350156845,
+  "measuredRangeM": [
+    4.1016445312500007,
+    5.0904338378906253,
+    6.0059794921875005,
+    7.0680124511718754,
+    3.0762333984375
+  ],
+  "truthRangeM": [
+    3.9409874213510623,
+    4.9030901397247346,
+    5.823204808685932,
+    6.8763188356931977,
+    2.9537811637438716
+  ],
+  "peakProminenceDb": [
+    27.9743587229677,
+    29.053245477562456,
+    20.081931697817986,
+    26.870537896158012,
+    26.198546886924738
+  ],
+  "leaveOneOutErrorM": [
+    0.024402080934791126,
+    0.015627801465637248,
+    0.0087742794691534343,
+    0.019977718778424247,
+    0.062606956140101033
+  ],
+  "leaveOneOutMedianM": 0.019977718778424247,
+  "leaveOneOutP95M": 0.054965981099039045,
+  "status": "PASS",
+  "applicable": true,
+  "note": "Radar contributes range/energy; aligned Depth-LiDAR geometry contributes bearing. Raw radar XYZ remains unchanged."
+}

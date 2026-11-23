@@ -142,6 +142,16 @@ if ~isfield(m, 'metaOut')
 end
 meta = m.metaOut;
 
+% Defaults are part of the cache key too. Older results without cleaning
+% metadata must be recomputed rather than silently reused.
+if ~isfield(o, 'depthCleaningEnabled'), o.depthCleaningEnabled = true; end
+if ~isfield(o, 'depthCleaning'), o.depthCleaning = struct(); end
+o.depthCleaning = depth_cleaning_defaults(o.depthCleaning);
+if ~isfield(meta, 'depthCleaningEnabled') || ~isfield(meta, 'depthCleaning')
+    why = '结果缺少深度清理版本信息';
+    return;
+end
+
 % 默认外参也参与缓存判断，避免修改 JSON 后仍误用旧点云。
 try
     extPath = [];
@@ -166,15 +176,21 @@ end
 
 % 参数比对（只有传进来的字段才比）
 fields = {'stride', 'eps', 'minPts', 'floorZ', 'mirrorDepth', 'useFloorAlignment', ...
+          'depthCleaningEnabled', 'depthCleaning', ...
           'cameraToRadarR', 'cameraOriginInRadarM', ...
           'radarRangeBiasM', 'radarAzimuthBiasDeg', 'radarElevationBiasDeg'};
 for i = 1:numel(fields)
     f = fields{i};
     if isfield(o, f) && isfield(meta, f)
-        a = double(o.(f));
-        b = double(meta.(f));
-        if ~isequal(size(a), size(b)) || any(abs(a(:) - b(:)) > 1e-9)
-            why = sprintf('%s 变了（%g → %g）', f, meta.(f), o.(f));
+        a = o.(f); b = meta.(f);
+        if isstruct(a) || isstruct(b)
+            changed = ~strcmp(jsonencode(a), jsonencode(b));
+        else
+            a = double(a); b = double(b);
+            changed = ~isequal(size(a), size(b)) || any(abs(a(:) - b(:)) > 1e-9);
+        end
+        if changed
+            why = sprintf('%s 发生变化', f);
             return;
         end
     end
@@ -191,4 +207,15 @@ end
 
 ok = true;
 why = sprintf('算于 %s', meta.createdAt);
+end
+
+function o = depth_cleaning_defaults(o)
+d = struct('rangeM', [0.3 12], 'edgeThresholdM', 0.025, ...
+    'edgeRelativeThreshold', 0.015, 'minimumLocalSamples', 4, ...
+    'minimumComponentPixels', 6, 'roiX', [-3 3], 'roiY', [0 9], ...
+    'roiZ', [-1.4 1.6], 'voxelM', 0.015, 'minVoxelNeighbors', 1);
+fields = fieldnames(d);
+for index = 1:numel(fields)
+    if ~isfield(o, fields{index}), o.(fields{index}) = d.(fields{index}); end
+end
 end
