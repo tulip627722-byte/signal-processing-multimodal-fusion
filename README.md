@@ -149,6 +149,8 @@ cd E:\leida\radar-camera-alignment\capture\app
 
 在线操作手册：[三模态点云融合执行手册](https://guide.tulip.yu/docs/offline-fusion-workflow.html)
 
+无需网页部署也可直接查看 Markdown 版：[三模态点云融合操作指南](docs/offline-fusion-guide.md)
+
 ---
 
 ## 五、后续计划
