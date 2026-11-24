@@ -147,7 +147,7 @@ cd E:\leida\radar-camera-alignment\capture\app
 
 更多分支说明见 [docs/BRANCHES.md](docs/BRANCHES.md)，历史课设资料见 [docs/legacy-course-design/README.md](docs/legacy-course-design/README.md)。
 
-在线操作手册（GitHub Pages）：[三模态点云融合执行手册](https://tulip627722-byte.github.io/signal-processing-multimodal-fusion/docs/offline-fusion-workflow.html)
+在线操作手册：[三模态点云融合执行手册](https://guide.tulip.yu/docs/offline-fusion-workflow.html)
 
 ---
 
