@@ -285,14 +285,11 @@ namespace Acquire
                 option.Kind != CameraKind.Null && option.HasDepth;
             if (!demo && _radarEnabled.Checked && _radarMode.SelectedIndex == 0)
             {
-                List<string> alignmentErrors = new List<string>();
-                if (option == null || !option.Available || option.Kind == CameraKind.Null) alignmentErrors.Add("未选择可用 RGB-D 相机");
-                else if (!option.HasDepth) alignmentErrors.Add("所选相机没有深度流");
-                if (!_lidarEnabled.Checked || _lidarMode.SelectedIndex != 1) alignmentErrors.Add("LiDAR 必须选择 MID-70 真机");
-                if (alignmentErrors.Count > 0)
+                // 三传感器帧对齐的硬性要求只剩 MID-70 真机；缺深度相机时降级为「雷达 + 激光」双路采集
+                if (!_lidarEnabled.Checked || _lidarMode.SelectedIndex != 1)
                 {
-                    MessageBox.Show(this, "ADC 三传感器帧对齐不能启动：\r\n\r\n• " + string.Join("\r\n• ", alignmentErrors.ToArray()) +
-                        "\r\n\r\n请同时启用 ADT7880 ADC、MID-70 真机和带深度流的相机。", "传感器未就绪", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    MessageBox.Show(this, "ADC 采集不能启动：\r\n\r\n• LiDAR 必须选择 MID-70 真机" +
+                        "\r\n\r\n请启用 ADT7880 ADC 与 MID-70 真机后重试。", "传感器未就绪", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                     return;
                 }
             }
@@ -303,9 +300,10 @@ namespace Acquire
             {
                 if (option == null || !option.Available || option.Kind == CameraKind.Null)
                 {
-                    warnings.Add("RGB-D 相机未连接或不可用（本次跳过相机）");
+                    warnings.Add("RGB-D 相机未连接或不可用（本次跳过相机，按雷达 + 激光采集）");
                     sessionCamera = null;
                 }
+                else if (!option.HasDepth) warnings.Add("所选相机没有深度流（本次按雷达 + 彩色采集）");
                 if (!_radarEnabled.Checked) warnings.Add("ADT7880 毫米波雷达未启用");
                 if (!_lidarEnabled.Checked) warnings.Add("Livox MID-70 未启用");
                 else if (_lidarMode.SelectedIndex != 1) warnings.Add("Livox 当前为模拟点云，不是真实 MID-70");
